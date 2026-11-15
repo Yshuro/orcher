@@ -4,6 +4,21 @@ What changes for an existing deployment or client when you move to a release,
 beyond the bug fixes listed in [CHANGELOG.md](CHANGELOG.md). Read the section
 for every release between the one you run and the one you are moving to.
 
+## Unreleased (after 0.7.1)
+
+- A child workflow now holds its workflow id in its namespace, as a top-level
+  run does: while it is open, no other run there may start under that id. A
+  child started under an id another open run holds, top-level or child, does
+  not run; its parent receives `ChildWorkflowExecutionFailed` with failure
+  type `ChildWorkflowIdInUse`. Before, children of different parents could
+  run under one id at once, and addressing that id reached any of them.
+  Children started without an id are unaffected on current SDKs, which derive
+  the id from the parent's. A TypeScript workflow that began under protocol
+  version 2 or earlier still names such a child `child_{n}`, so two of those
+  parents running at once now have the second one's child refused. Children
+  that were already open when you upgrade hold nothing and are not checked
+  against.
+
 ## 0.7.0
 
 - `security.tenancy` is no longer inferred from the `organizations` table.

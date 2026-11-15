@@ -13,6 +13,8 @@ use orcher_storage::schema::types::execution::WorkflowExecution;
 use serde_json::Value;
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
+
+use super::child_outcome::WORKFLOW_ID_IN_USE;
 use uuid::Uuid;
 
 use crate::engine::queues::outbox::OutboxQueue;
@@ -466,11 +468,13 @@ impl WorkflowExecutionService {
     /// The row of a new run of `start`, not yet written: the one place a run
     /// is made from what its start asked for.
     ///
-    /// A top-level run holds its workflow id: while it is open, no other run
-    /// in the organization's namespace may start under the same id, and a
+    /// A run started under a workflow id holds it: while it is open, no other
+    /// run in the organization's namespace may start under the same id, and a
     /// start that races another is refused by the insert itself (V059). A
-    /// child's id is its parent's name for it, unique per parent only, so a
-    /// child holds nothing.
+    /// child holds its id as a top-level run does. It used to hold nothing, its
+    /// id taken for its parent's name for it, so two parents' children ran
+    /// under one id at once, and a child could take the id of an open
+    /// top-level run: whatever addressed the id reached one of them.
     fn new_run(
         &self,
         start: &RunStart,
@@ -497,7 +501,7 @@ impl WorkflowExecutionService {
             request_id,
         } = start;
 
-        let holds_workflow_id = parent_execution_id.is_none() && workflow_id.is_some();
+        let holds_workflow_id = workflow_id.is_some();
 
         let mut builder = WorkflowExecution::builder()
             .execution_id(execution_id.clone())
@@ -1381,42 +1385,81 @@ impl WorkflowExecutionService {
             annotations,
             timeouts,
         } = settings;
-        let execution = self
+        let start = RunStart {
+            workflow_name: child_workflow_type.to_string(),
+            workflow_version: workflow_version.to_string(),
+            namespace: namespace.to_string(),
+            task_queue: task_queue.to_string(),
+            input,
+            // The child's workflow id, held in its namespace as a
+            // top-level run's is. Its outcome names it back to the
+            // parent, which matches it to its child call on replay.
+            workflow_id: Some(child_workflow_id.to_string()),
+            labels,
+            // The child's own retry policy, stored the way a top-level
+            // start stores one, so the retry scheduler treats both alike.
+            max_retries,
+            retry_policy,
+            // The child's own time limits, from its start command. Its
+            // execution deadline runs from its own start: a child
+            // starts a chain of its own and does not inherit its
+            // parent's limits.
+            timeouts,
+            annotations,
+            // A child's start command asks for no delay, and is
+            // made once by its parent's command, not by a request.
+            start_delay: None,
+            request_id: None,
+        };
+        let execution = match self
             .start_workflow_with_id(
                 execution_id.to_string(),
-                RunStart {
-                    workflow_name: child_workflow_type.to_string(),
-                    workflow_version: workflow_version.to_string(),
-                    namespace: namespace.to_string(),
-                    task_queue: task_queue.to_string(),
-                    input,
-                    // The child carries the parent-assigned correlation id
-                    // (e.g. "child_0") as its workflow_id. On completion this
-                    // id is echoed back in the ChildWorkflowExecutionCompleted
-                    // event so the parent can match it to its child call on
-                    // replay. workflow_id is not unique (only execution_id
-                    // is), so per-parent ids like "child_0" are safe.
-                    workflow_id: Some(child_workflow_id.to_string()),
-                    labels,
-                    // The child's own retry policy, stored the way a top-level
-                    // start stores one, so the retry scheduler treats both alike.
-                    max_retries,
-                    retry_policy,
-                    // The child's own time limits, from its start command. Its
-                    // execution deadline runs from its own start: a child
-                    // starts a chain of its own and does not inherit its
-                    // parent's limits.
-                    timeouts,
-                    annotations,
-                    // A child's start command asks for no delay, and is
-                    // made once by its parent's command, not by a request.
-                    start_delay: None,
-                    request_id: None,
-                },
+                start.clone(),
                 Some(parent_execution_id.to_string()),
                 organization_id,
             )
-            .await?;
+            .await
+        {
+            Ok(execution) => execution,
+            // Another open run holds the id: the child cannot run under it.
+            // Its parent is told as it is of any ending, by the child's run,
+            // so the run is recorded as having failed before it began.
+            Err(e) if is_workflow_id_held(&e) => {
+                let holder = self
+                    .execution_repository
+                    .open_run_holding(organization_id, namespace, child_workflow_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|run| format!(" (run {})", run.execution_id))
+                    .unwrap_or_default();
+                let reason = format!(
+                    "workflow id '{child_workflow_id}' is in use by an open run{holder} \
+                     in namespace '{namespace}'"
+                );
+                let root_execution_id = self.get_root_execution_id(parent_execution_id).await?;
+                let mut refused = self.new_run(
+                    &start,
+                    execution_id.to_string(),
+                    Some(parent_execution_id.to_string()),
+                    root_execution_id,
+                    organization_id,
+                );
+                refused.holds_workflow_id = false;
+                warn!(
+                    child_workflow_id = %child_workflow_id,
+                    execution_id = %execution_id,
+                    parent_execution_id = %parent_execution_id,
+                    reason = %reason,
+                    "Child refused: its workflow id is held by another open run"
+                );
+                return self
+                    .execution_repository
+                    .create_refused(&refused, &reason, WORKFLOW_ID_IN_USE)
+                    .await;
+            }
+            Err(e) => return Err(e),
+        };
 
         info!(
             child_workflow_id = %child_workflow_id,

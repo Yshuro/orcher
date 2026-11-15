@@ -30,6 +30,12 @@ pub struct CommandProcessingResult {
     /// failure is not retried, whatever the retry policy allows.
     pub non_retryable: bool,
 
+    /// Execution ids of the children this batch started that were refused
+    /// because another open run holds their workflow id. Their runs have
+    /// ended; the parent is told once the completion is applied, rather than
+    /// waiting for the reconciliation sweep.
+    pub refused_children: Vec<String>,
+
     /// Number of commands successfully processed
     pub commands_processed: usize,
 }
