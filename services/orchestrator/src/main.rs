@@ -2413,6 +2413,10 @@ fn server_exit_error(
 /// claim timeout keeps the first well inside the time a lost activation is
 /// already allowed, and leaves the second to activations that are close to
 /// being taken back by the reclaimer anyway.
+///
+/// It is the bound for every run without a task timeout of its own. A run with
+/// one is given half of it when that is longer, and no run is given more than
+/// its claim's term (see `release_claim_to_resume_on`).
 fn activation_in_flight_bound(claim_timeout_secs: u64) -> std::time::Duration {
     std::time::Duration::from_secs(
         std::env::var("ORCHER_ACTIVATION_IN_FLIGHT_SECS")

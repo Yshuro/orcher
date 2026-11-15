@@ -473,13 +473,15 @@ async fn claims_not_stuck_on_a_dead_engine_are_left_alone() {
         .expect("claimable");
     sqlx::query(
         "UPDATE workflow_executions \
-         SET claimed_at = claimed_at - make_interval(secs => $2) WHERE execution_id = $1",
+         SET claimed_at = claimed_at - make_interval(secs => $2), \
+             claim_timeout_at = NOW() - INTERVAL '90 seconds' \
+         WHERE execution_id = $1",
     )
     .bind(&timed_out_already)
-    .bind((CLAIM_TIMEOUT_SECS + 10) as f64)
+    .bind((CLAIM_TIMEOUT_SECS + 90) as f64)
     .execute(&pool)
     .await
-    .expect("claim it longer ago than the claim timeout");
+    .expect("a claim that timed out before its engine was last seen");
 
     // `dead` stopped heartbeating a minute ago, and then made one more claim.
     died_ago(&pool, &[&pool], &dead, 60).await;
@@ -497,7 +499,8 @@ async fn claims_not_stuck_on_a_dead_engine_are_left_alone() {
         0
     );
 
-    // The one claimed longer ago than the claim timeout is the reclaimer's.
+    // The one whose claim had timed out before the engine died is the
+    // reclaimer's.
     for execution_id in [&of_live, &parked, &claimed_after, &timed_out_already] {
         let (claimed_by, _, activation) = claim_of(&pool, execution_id).await;
         assert_eq!(claimed_by.as_deref(), Some(WORKER), "{execution_id}");
@@ -506,6 +509,50 @@ async fn claims_not_stuck_on_a_dead_engine_are_left_alone() {
     assert!(continuations(&survivor, &task_queue).is_empty());
 
     cleanup(&pool, &task_queue, &[&live, &dead, &survivor]).await;
+}
+
+/// A claim made under a run's own task timeout, longer than the engine's
+/// claim timeout, is released when its engine dies, however long before the
+/// engine's last heartbeat it was made: its term had not run out. The look
+/// back used to be the engine's claim timeout, so such a claim waited out its
+/// whole term though its engine was gone.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL
+async fn a_dead_engines_claim_under_a_long_task_timeout_is_released() {
+    let pool = pool().await;
+    let dead = engine(&pool, None).await;
+    let survivor = engine(&pool, None).await;
+    let task_queue = queue();
+
+    let long_running = workflow(&pool, Uuid::new_v4(), &task_queue).await;
+    dead.repo
+        .claim_execution_by_id(&long_running, WORKER, CLAIM_TIMEOUT_SECS, None, None)
+        .await
+        .expect("claim")
+        .expect("claimable");
+    // Claimed twenty minutes ago, under an hour's task timeout.
+    sqlx::query(
+        "UPDATE workflow_executions \
+         SET claimed_at = NOW() - INTERVAL '20 minutes', \
+             claim_timeout_at = NOW() + INTERVAL '40 minutes' \
+         WHERE execution_id = $1",
+    )
+    .bind(&long_running)
+    .execute(&pool)
+    .await
+    .expect("claim it under a long task timeout");
+
+    died_ago(&pool, &[&pool], &dead, STALE_AFTER_SECS + GRACE_SECS + 1).await;
+    survivor.heartbeat().await;
+    assert_eq!(
+        survivor.dead_claims.sweep().await.expect("sweep").workflows,
+        1,
+        "the claim's term had not run out when its engine died"
+    );
+    let (claimed_by, _, _) = claim_of(&pool, &long_running).await;
+    assert_eq!(claimed_by, None);
+
+    cleanup(&pool, &task_queue, &[&dead, &survivor]).await;
 }
 
 /// Two survivors observe the same death and sweep at once. Each claim is
