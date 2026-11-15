@@ -1130,6 +1130,16 @@ impl OrchestratorConfig {
                 self.security.tls.is_some(),
                 "TLS configuration is required when auth_mode is 'mtls' or 'api-key-and-mtls'"
             );
+            // The client certificate is the credential: a server that does
+            // not ask for one lets every caller in unauthenticated.
+            anyhow::ensure!(
+                self.security
+                    .tls
+                    .as_ref()
+                    .is_some_and(|tls| tls.require_client_cert),
+                "tls.require_client_cert must be true when auth_mode is 'mtls' or \
+                 'api-key-and-mtls': without it no client certificate is checked"
+            );
         }
 
         if let Some(ref tls) = self.security.tls {
@@ -1620,6 +1630,46 @@ mod section_defaults {
             config.security.auth_mode = mode;
             assert!(!config.exposes_unauthenticated_api());
         }
+    }
+
+    /// A client certificate is the credential in the mTLS modes, so a server
+    /// that would not ask for one does not start.
+    #[test]
+    fn mtls_needs_the_client_certificate_checked() {
+        let mut config = OrchestratorConfig::default();
+        let tls = super::TlsServerConfig {
+            cert_path: "server.crt".into(),
+            key_path: "server.key".into(),
+            ca_cert_path: Some("ca.crt".into()),
+            require_client_cert: false,
+        };
+        for mode in [super::AuthMode::Mtls, super::AuthMode::ApiKeyAndMtls] {
+            config.security.auth_mode = mode;
+            config.security.tls = Some(tls.clone());
+            let error = config.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("require_client_cert must be true"),
+                "{error}"
+            );
+
+            config.security.tls = Some(super::TlsServerConfig {
+                require_client_cert: true,
+                ca_cert_path: None,
+                ..tls.clone()
+            });
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("ca_cert_path is required"), "{error}");
+
+            config.security.tls = Some(super::TlsServerConfig {
+                require_client_cert: true,
+                ..tls.clone()
+            });
+            assert!(config.validate().is_ok());
+        }
+        // TLS without mTLS authentication may leave client certificates out.
+        config.security.auth_mode = super::AuthMode::ApiKey;
+        config.security.tls = Some(tls);
+        assert!(config.validate().is_ok());
     }
 
     #[test]
