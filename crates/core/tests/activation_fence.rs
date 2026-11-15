@@ -878,6 +878,67 @@ async fn a_wake_up_during_an_activation_waits_for_its_completion() {
     cleanup(&pool, id, &execution_id).await;
 }
 
+/// Put the activation of `id` as claimed `ago_secs` ago, under the run's own
+/// task timeout `task_timeout_secs` when it has one, claimed for that long as
+/// a claim made under it is (the engine's 300 otherwise).
+async fn out_for(pool: &PgPool, id: Uuid, ago_secs: i64, task_timeout_secs: Option<i64>) {
+    sqlx::query(
+        "UPDATE workflow_executions \
+         SET task_timeout_secs = $3, \
+             claimed_at = NOW() - make_interval(secs => $2), \
+             claim_timeout_at = NOW() - make_interval(secs => $2) \
+                                + make_interval(secs => COALESCE($3, 300)) \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(ago_secs as f64)
+    .bind(task_timeout_secs.map(|s| s as i32))
+    .execute(pool)
+    .await
+    .expect("set the claim's age and term");
+}
+
+/// Whether an activation is still in flight when a wake-up arrives follows
+/// the run's own task timeout: it has half of it when that is longer than the
+/// engine's bound, and no run has longer than its claim's term. The bound used
+/// to be the engine's alone, so an activation running for ten minutes under an
+/// hour's task timeout was taken for lost, and its workflow handed to a second
+/// worker while it still ran. A run without a task timeout keeps the engine's
+/// bound exactly.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL
+async fn a_wake_up_judges_an_activation_by_its_runs_task_timeout() {
+    use orcher_storage::repositories::domains::workflow_execution::Resume;
+    let pool = pool().await;
+    let (_service, repo) = engine(&pool).await;
+    repo.set_activation_in_flight_bound(std::time::Duration::from_secs(60));
+
+    // (age of the activation, the run's task timeout, what a wake-up does)
+    let cases = [
+        // Ten minutes into an hour's task timeout: still running.
+        (600, Some(3_600), Resume::Deferred),
+        // Forty minutes into an hour's task timeout: past half of it.
+        (2_400, Some(3_600), Resume::Released),
+        // Two minutes old, no task timeout of its own: past the engine's bound.
+        (120, None, Resume::Released),
+        // Within the engine's bound.
+        (20, None, Resume::Deferred),
+        // Within the engine's bound, but its own ten-second term is over.
+        (20, Some(10), Resume::Released),
+    ];
+    for (ago, task_timeout, expected) in cases {
+        let (id, execution_id, task_queue) = workflow(&pool).await;
+        claim(&repo, &task_queue, WORKER).await;
+        out_for(&pool, id, ago, task_timeout).await;
+        assert_eq!(
+            repo.release_claim_to_resume(&execution_id).await.unwrap(),
+            expected,
+            "an activation {ago}s old under a task timeout of {task_timeout:?}"
+        );
+        cleanup(&pool, id, &execution_id).await;
+    }
+}
+
 /// A completion whose first attempt recorded itself and was then cut off —
 /// its caller hung up before the claim and permit went back — has what it
 /// missed done when it is sent again.

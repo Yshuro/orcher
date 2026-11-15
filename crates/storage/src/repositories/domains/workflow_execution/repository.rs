@@ -567,9 +567,10 @@ const WAKING_OUTCOMES: &[&str] = &[
 ///
 /// In flight means: claimed, handed out more recently than any completion
 /// that has been applied (`activation_seq` ahead of `completed_activation`),
-/// and claimed within the last `in_flight_secs`. The time bound is what keeps
-/// a workflow from waiting out its whole claim timeout when the activation's
-/// completion will never be recorded:
+/// its claim not yet timed out, and claimed within the last `in_flight_secs`
+/// or half the run's own task timeout, whichever is longer. The time bound is what
+/// keeps a workflow from waiting out its whole claim timeout when the
+/// activation's completion will never be recorded:
 ///
 /// * during a rolling deploy, an engine from before V048 applies completions
 ///   without recording them, so every workflow it completes looks in flight
@@ -581,6 +582,16 @@ const WAKING_OUTCOMES: &[&str] = &[
 /// handed out again beside it, and its completion then arrives stale and is
 /// acknowledged without being applied — the newer activation replays and does
 /// the same work.
+///
+/// A run with a task timeout of its own (`task_timeout_secs`) is claimed for
+/// that long, and gets half of it when that is more than `in_flight_secs`, as
+/// every other run gets about half the engine's claim timeout. It used to get
+/// `in_flight_secs` alone, so a run allowed an hour per activation had its
+/// activation taken for lost after a minute or two, and was handed to a second
+/// worker while the first was still running it. A run without one keeps
+/// exactly `in_flight_secs`, as configured. And a claim whose term has run out
+/// (`claim_timeout_at`) is not in flight, whatever the bound: its activation
+/// is the reclaimer's.
 pub async fn release_claim_to_resume_on(
     pool: &PgPool,
     key_predicate: &str,
@@ -590,7 +601,9 @@ pub async fn release_claim_to_resume_on(
 ) -> OrcherResult<Resume> {
     let in_flight = "(claimed_by IS NOT NULL \
                      AND activation_seq > COALESCE(completed_activation, 0) \
-                     AND claimed_at > NOW() - make_interval(secs => $2))";
+                     AND COALESCE(claim_timeout_at > NOW(), TRUE) \
+                     AND claimed_at > NOW() - make_interval(secs => \
+                         GREATEST($2, COALESCE(task_timeout_secs, 0) / 2.0)))";
     let sql = format!(
         r#"
         UPDATE workflow_executions
@@ -5591,12 +5604,14 @@ impl WorkflowExecutionRepository {
     /// A claim made after `last_seen` plus `alive_margin_secs` is not
     /// released. The dead engine could not have made it; an engine that was
     /// only paused, and is back, did — after its heartbeat had already gone
-    /// stale — and its claims are as good as anyone's. Nor is one made more
-    /// than `claim_timeout_secs` before `last_seen`: that one has timed out
-    /// already and is the reclaimer's, and leaving it out keeps the read to
-    /// the few claims made in the engine's last minutes. (An engine
-    /// configured with a longer claim timeout than this one has its oldest
-    /// claims wait for that timeout, as they did before.)
+    /// stale — and its claims are as good as anyone's. Nor is one whose term
+    /// (`claim_timeout_at`) had run out by `last_seen`: that one had timed out
+    /// already and is the reclaimer's. The term is the claim's own, which a
+    /// run's task timeout sets; the read used to look back the engine's claim
+    /// timeout from `last_seen` instead, so a claim made under a longer task
+    /// timeout, earlier than that, was left to wait out its whole term though
+    /// its engine was gone. `claim_timeout_secs` still bounds the look back
+    /// for a claim with no term recorded.
     ///
     /// A completion being applied right now is never released under it.
     /// Commands are applied outside the transaction of the activation fence,
@@ -5652,7 +5667,9 @@ impl WorkflowExecutionRepository {
                      AND c.claimed_by IS NOT NULL
                      AND c.activation_seq > COALESCE(c.completed_activation, 0)
                      AND c.claimed_at <= dead.last_seen + make_interval(secs => $3)
-                     AND c.claimed_at >= dead.last_seen - make_interval(secs => $4)
+                     AND COALESCE(
+                         c.claim_timeout_at > dead.last_seen,
+                         c.claimed_at >= dead.last_seen - make_interval(secs => $4))
                     OFFSET 0
                 ) AS candidate
                 WHERE we.id = candidate.id
