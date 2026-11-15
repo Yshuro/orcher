@@ -4,7 +4,7 @@ use crate::engine::queues::{OutboxQueue, OutboxTask};
 use orcher_common::error::OrcherResult;
 use orcher_storage::repositories::domains::coordination::CoordinationRepository;
 use orcher_storage::traits::domain::CoordinationRepositoryTrait;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
@@ -112,11 +112,9 @@ pub struct OutboxProcessor {
     /// Configuration
     config: OutboxProcessorConfig,
 
-    /// Per-workflow locks to ensure ordering
-    workflow_locks: Arc<Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>,
-
-    /// Currently processing workflows
-    active_workflows: Arc<Mutex<HashSet<Uuid>>>,
+    /// The workflows whose rows are being handled, each with the lock that
+    /// keeps its batches one after another.
+    lanes: Arc<WorkflowLanes>,
 
     /// Processor metrics
     metrics: Arc<Mutex<ProcessorMetrics>>,
@@ -127,6 +125,73 @@ pub struct OutboxProcessor {
     /// Immediate wake-up signal. Called when new tasks are inserted into the outbox,
     /// so the processor doesn't have to wait for the next poll interval.
     wake: Arc<Notify>,
+}
+
+/// The workflows whose outbox rows this processor is handling.
+///
+/// A workflow's lane exists while at least one of its batches is being handled
+/// or waits its turn, and goes when the last of them leaves. Whether it can
+/// go used to be asked of the database after every batch, by reading every
+/// pending row of the workflow: a fan-out of N tasks read its backlog of up to
+/// N rows once per batch, so the reads grew with the square of the fan-out
+/// whenever its rows were made faster than they left. A lane is an in-memory
+/// lock; only the batches holding it say when it is free, and they are
+/// counted here.
+///
+/// The count is also what an active workflow is. Kept as a set it lost a
+/// workflow whose two batches overlapped as soon as the first was done, so
+/// the processor took on more workflows than its limit while the second ran.
+#[derive(Default)]
+struct WorkflowLanes {
+    lanes: std::sync::Mutex<HashMap<Uuid, Lane>>,
+}
+
+struct Lane {
+    lock: Arc<Mutex<()>>,
+    /// The batches in the lane: handled, or waiting for the lock.
+    batches: usize,
+}
+
+impl WorkflowLanes {
+    /// Enter `workflow_id`'s lane, making it if it is not there.
+    fn enter(self: &Arc<Self>, workflow_id: Uuid) -> LaneTicket {
+        let mut lanes = self.lanes.lock().unwrap_or_else(|e| e.into_inner());
+        let lane = lanes.entry(workflow_id).or_insert_with(|| Lane {
+            lock: Arc::new(Mutex::new(())),
+            batches: 0,
+        });
+        lane.batches += 1;
+        LaneTicket {
+            lanes: Arc::clone(self),
+            workflow_id,
+            lock: Arc::clone(&lane.lock),
+        }
+    }
+
+    /// How many workflows have a batch in their lane.
+    fn len(&self) -> usize {
+        self.lanes.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+/// A batch's place in its workflow's lane; leaving drops the lane once no
+/// batch is left in it.
+struct LaneTicket {
+    lanes: Arc<WorkflowLanes>,
+    workflow_id: Uuid,
+    lock: Arc<Mutex<()>>,
+}
+
+impl Drop for LaneTicket {
+    fn drop(&mut self) {
+        let mut lanes = self.lanes.lanes.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(lane) = lanes.get_mut(&self.workflow_id) {
+            lane.batches -= 1;
+            if lane.batches == 0 {
+                lanes.remove(&self.workflow_id);
+            }
+        }
+    }
 }
 
 impl OutboxProcessor {
@@ -143,8 +208,7 @@ impl OutboxProcessor {
             outbox,
             coordination_repo,
             config,
-            workflow_locks: Arc::new(Mutex::new(HashMap::new())),
-            active_workflows: Arc::new(Mutex::new(HashSet::new())),
+            lanes: Arc::new(WorkflowLanes::default()),
             metrics: Arc::new(Mutex::new(ProcessorMetrics::default())),
             shutdown: Arc::new(Mutex::new(false)),
             wake,
@@ -205,7 +269,9 @@ impl OutboxProcessor {
 
     /// Get current metrics
     pub async fn get_metrics(&self) -> ProcessorMetrics {
-        self.metrics.lock().await.clone()
+        let mut metrics = self.metrics.lock().await.clone();
+        metrics.active_workflows = self.lanes.len();
+        metrics
     }
 
     /// Main processing loop
@@ -243,7 +309,7 @@ impl OutboxProcessor {
             }
 
             // Check if we're at max capacity
-            let active_count = self.active_workflows.lock().await.len();
+            let active_count = self.lanes.len();
             if active_count >= self.config.max_concurrent_workflows {
                 debug!(
                     active_workflows = active_count,
@@ -335,20 +401,12 @@ impl OutboxProcessor {
             + Sync
             + 'static,
     {
-        // Get or create workflow lock
-        let workflow_lock = {
-            let mut locks = self.workflow_locks.lock().await;
-            locks
-                .entry(workflow_id)
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-
-        // Mark workflow as active
-        self.active_workflows.lock().await.insert(workflow_id);
-
-        // Acquire workflow lock to ensure ordering
-        let _guard = workflow_lock.lock().await;
+        // The workflow's lane, held until this batch is done: while any batch
+        // of the workflow holds it, the workflow counts as active and its
+        // batches run one after another. Left on drop, so a batch that panics
+        // or is cancelled leaves it too.
+        let lane = self.lanes.enter(workflow_id);
+        let _in_order = lane.lock.lock().await;
 
         debug!(
             workflow_id = %workflow_id,
@@ -369,20 +427,6 @@ impl OutboxProcessor {
                     error = %e,
                     "Task execution failed"
                 );
-            }
-        }
-
-        // Remove from active workflows
-        self.active_workflows.lock().await.remove(&workflow_id);
-
-        // Clean up lock if no more tasks pending
-        if let Ok(pending_count) = self
-            .outbox
-            .get_pending_count_for_workflow(workflow_id)
-            .await
-        {
-            if pending_count == 0 {
-                self.workflow_locks.lock().await.remove(&workflow_id);
             }
         }
     }
@@ -760,6 +804,60 @@ mod tests {
     use super::*;
     use sqlx::PgPool;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_lane_goes_when_its_last_batch_leaves() {
+        let lanes = Arc::new(WorkflowLanes::default());
+        let workflow = Uuid::new_v4();
+        let first = lanes.enter(workflow);
+        let second = lanes.enter(workflow);
+        assert!(
+            Arc::ptr_eq(&first.lock, &second.lock),
+            "one lock per workflow"
+        );
+        assert_eq!(lanes.len(), 1);
+
+        // The first batch to finish leaves the workflow active: the second is
+        // still in its lane.
+        drop(first);
+        assert_eq!(lanes.len(), 1);
+        drop(second);
+        assert_eq!(
+            lanes.len(),
+            0,
+            "nothing is kept for a workflow with no batch"
+        );
+    }
+
+    #[test]
+    fn each_workflow_has_a_lane_of_its_own() {
+        let lanes = Arc::new(WorkflowLanes::default());
+        let a = lanes.enter(Uuid::new_v4());
+        let b = lanes.enter(Uuid::new_v4());
+        assert!(!Arc::ptr_eq(&a.lock, &b.lock));
+        assert_eq!(lanes.len(), 2);
+        drop(a);
+        assert_eq!(lanes.len(), 1);
+        drop(b);
+        assert_eq!(lanes.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_batch_that_panics_leaves_its_lane() {
+        let lanes = Arc::new(WorkflowLanes::default());
+        let workflow = Uuid::new_v4();
+        let held = Arc::clone(&lanes);
+        let batch = tokio::spawn(async move {
+            let lane = held.enter(workflow);
+            let _in_order = lane.lock.lock().await;
+            panic!("a batch that fails midway");
+        });
+        assert!(batch.await.is_err());
+        assert_eq!(lanes.len(), 0);
+        // And the workflow's next batch is not held back by it.
+        let next = lanes.enter(workflow);
+        assert!(next.lock.try_lock().is_ok());
+    }
 
     async fn create_test_pool() -> PgPool {
         todo!("Test pool creation")
