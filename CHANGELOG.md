@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.2](https://github.com/orcher-io/orcher/compare/v0.7.1...v0.7.2) (2026-11-15)
+
+
+### Features
+
+* report where the run's last applied activation read its journal to ([65c03fc](https://github.com/orcher-io/orcher/commit/65c03fc200f53cac413595859e82e9ae982a186c))
+
+
+### Bug Fixes
+
+* **common:** write whole microseconds to PostgreSQL exactly ([41e0889](https://github.com/orcher-io/orcher/commit/41e0889935662fac77e906defca94cde675fff27)), closes [#24](https://github.com/orcher-io/orcher/issues/24)
+* **config:** refuse mTLS authentication that checks no client certificate ([55d6a28](https://github.com/orcher-io/orcher/commit/55d6a2820a97dd7ce30c5d127e4e2c984fd66a03))
+* **dispatch:** answer a timed-out claim as UNAVAILABLE, with the time it waited ([44dda85](https://github.com/orcher-io/orcher/commit/44dda853f012df56515f4cba1d1f73287668e92d))
+* **dispatch:** keep a wake-up that lands while a run waits in the prefetch buffer ([9d0a8f3](https://github.com/orcher-io/orcher/commit/9d0a8f37fd492ab806b12a333879a70ce25444e0))
+* hold a child's workflow id in its namespace, as a top-level run's ([e339e07](https://github.com/orcher-io/orcher/commit/e339e070fcc99967849d573f96a5828ca4850c59)), closes [#14](https://github.com/orcher-io/orcher/issues/14)
+* judge an activation in flight by its run's own task timeout ([32ce5a6](https://github.com/orcher-io/orcher/commit/32ce5a6cc73213506df1b46b321dfadbdc398b5e)), closes [#16](https://github.com/orcher-io/orcher/issues/16)
+* stop reading a workflow's outbox backlog after every batch ([314c77a](https://github.com/orcher-io/orcher/commit/314c77a82f5cf8005bd8fd9a0790dfc5f9effad8)), closes [#21](https://github.com/orcher-io/orcher/issues/21)
+* stop the tasks scheduled by activations that had not seen the cancel request ([9134746](https://github.com/orcher-io/orcher/commit/9134746a918bcd152f2b68b29e3cef633e747f87)), closes [#17](https://github.com/orcher-io/orcher/issues/17)
+* **storage:** schedule a task by the database's clock ([9f43985](https://github.com/orcher-io/orcher/commit/9f43985558ae254427171ec03eeafc2728dc7206)), closes [#26](https://github.com/orcher-io/orcher/issues/26)
+
 ## [0.7.1](https://github.com/orcher-io/orcher/compare/v0.7.0...v0.7.1) (2026-11-13)
 
 
