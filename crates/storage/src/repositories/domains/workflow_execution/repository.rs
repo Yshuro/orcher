@@ -1491,6 +1491,69 @@ impl WorkflowExecutionRepository {
         Ok((created_execution, task_id_result))
     }
 
+    /// Write `execution` as a run that ended before it began: failed for
+    /// good with `reason`, under `failure_type`, holding nothing and handed
+    /// to no one.
+    ///
+    /// For a child its parent started under a workflow id another open run
+    /// holds. The child cannot run, and its parent has to be told so the way
+    /// it is told of any ending, by the child's run; this is that run. It has
+    /// no dispatch, so no worker is given it, and it is final — failed with no
+    /// retries, settled — so the delivery and the sweep that tell a parent how
+    /// its child ended tell this one at once. Routed by its id like any run.
+    pub async fn create_refused(
+        &self,
+        execution: &WorkflowExecution,
+        reason: &str,
+        failure_type: &str,
+    ) -> OrcherResult<WorkflowExecution> {
+        let routed_id = execution.id.as_uuid();
+        let shard_id: Option<i32> = self.shard_resolver.get().map(|r| r.shard_of(routed_id));
+        let row = sqlx::query_as::<_, WorkflowExecutionRow>(concat!(
+            r#"
+            INSERT INTO workflow_executions (
+                id, shard_id, execution_id, workflow_id, workflow_name, workflow_type,
+                workflow_version, namespace, task_queue, status, parameters, labels,
+                annotations, trigger_type, organization_id, parent_execution_id,
+                root_execution_id, submitted_at, started_at, completed_at,
+                max_retries, retries_settled_at, holds_workflow_id, error, error_details
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'failed', $10, $11, $12, $13, $14,
+                    $15, $16, $17, NOW(), NOW(), 0, NOW(), FALSE, $18,
+                    jsonb_build_object('failure_type', $19::text, 'message', $18::text))
+            RETURNING "#,
+            crate::repositories::columns::workflow_executions!()
+        ))
+        .bind(routed_id)
+        .bind(shard_id)
+        .bind(&execution.execution_id)
+        .bind(&execution.workflow_id)
+        .bind(&execution.workflow_name)
+        .bind(&execution.workflow_type)
+        .bind(&execution.workflow_version)
+        .bind(&execution.namespace)
+        .bind(&execution.task_queue)
+        .bind(&execution.parameters)
+        .bind(&execution.labels)
+        .bind(&execution.annotations)
+        .bind(&execution.trigger_type)
+        .bind(execution.organization_id)
+        .bind(&execution.parent_execution_id)
+        .bind(&execution.root_execution_id)
+        .bind(execution.submitted_at)
+        .bind(reason)
+        .bind(failure_type)
+        .fetch_one(self.pool_for(None, routed_id))
+        .await
+        .map_err(|e| {
+            OrcherError::internal(format!(
+                "Failed to record refused run {}: {}",
+                execution.execution_id, e
+            ))
+        })?;
+        Ok(row.into())
+    }
+
     /// Batch-create multiple workflow executions with outbox tasks and journal entries
     /// in a single database transaction. This is 5-10x faster than calling
     /// `create_with_outbox_task` N times because it uses 1 commit instead of N.
@@ -1944,8 +2007,10 @@ impl WorkflowExecutionRepository {
 
     /// The latest run started under `workflow_id` in `organization_id`'s
     /// `namespace`, open or closed, on any shard — what a reuse policy judges
-    /// a new start against. A child's run is not one: its id is its parent's
-    /// name for it. Runs written before V059 hold nothing once closed, so a
+    /// a new start against. A child's run counts once it holds its id, as
+    /// children have since they were held to one open run per id; one from
+    /// before, which held nothing, and one refused for starting under an id
+    /// in use do not. Runs written before V059 hold nothing once closed, so a
     /// first run (one with no predecessor) counts too.
     pub async fn latest_run_named(
         &self,
@@ -2037,8 +2102,11 @@ impl WorkflowExecutionRepository {
     ///   namespaces, so the namespace does not narrow it. When a `workflow_id`
     ///   is given too, the run must be one of that workflow's runs (or, for a
     ///   run without a workflow id, the run itself).
-    /// - Otherwise a `workflow_id` names the workflow's latest run in
-    ///   `namespace`: an id is unique only within an organization's namespace.
+    /// - Otherwise a `workflow_id` names the run holding it in `namespace`
+    ///   while one is open, else the workflow's latest run there: an id is
+    ///   unique only within an organization's namespace. The holder comes
+    ///   first because a later run may carry the id without holding it — a
+    ///   child refused for starting under it — and must not stand in for it.
     /// - A `workflow_id` that names no workflow there is tried as a run id,
     ///   because callers have long passed one in that field.
     ///
@@ -2063,6 +2131,12 @@ impl WorkflowExecutionRepository {
         }
         if run.workflow_id.is_empty() {
             return Ok(None);
+        }
+        if let Some(holder) = self
+            .open_run_holding(run.organization_id, run.namespace, run.workflow_id)
+            .await?
+        {
+            return Ok(Some(holder));
         }
         if let Some(latest) = self
             .find_latest_owned(run.organization_id, run.namespace, run.workflow_id)

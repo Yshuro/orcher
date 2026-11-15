@@ -38,6 +38,10 @@ const OUTCOME_EVENT_TYPES: [&str; 2] = [
     "ChildWorkflowExecutionFailed",
 ];
 
+/// The failure type of a child's run refused because another open run holds
+/// the workflow id it was started under: the run never began.
+pub const WORKFLOW_ID_IN_USE: &str = "WorkflowIdInUse";
+
 /// How a child workflow ended, as its parent is told.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChildOutcome {
@@ -66,6 +70,12 @@ pub enum ChildOutcome {
         /// Why, as the parent is told.
         reason: String,
     },
+    /// It never ran: another open run holds the workflow id it was started
+    /// under.
+    IdInUse {
+        /// Why, as the parent is told.
+        reason: String,
+    },
 }
 
 impl ChildOutcome {
@@ -86,6 +96,9 @@ impl ChildOutcome {
             // result, not a missing one.
             "completed" => ChildOutcome::Completed {
                 result: run.result.clone().unwrap_or(Value::Null),
+            },
+            "failed" if was_refused_id_in_use(run) => ChildOutcome::IdInUse {
+                reason: reason("Child workflow id is in use"),
             },
             "failed" => ChildOutcome::Failed {
                 error: reason("Child workflow failed"),
@@ -136,6 +149,11 @@ impl ChildOutcome {
                 reason,
                 Some("ChildWorkflowTerminated"),
             ),
+            ChildOutcome::IdInUse { reason } => (
+                "ChildWorkflowExecutionFailed",
+                reason,
+                Some("ChildWorkflowIdInUse"),
+            ),
         };
         payload["failure_reason"] = Value::String(reason.clone());
         if let Some(failure_type) = failure_type {
@@ -143,6 +161,18 @@ impl ChildOutcome {
         }
         (event_type, payload)
     }
+}
+
+/// Whether `run` is a child's run refused because another open run holds its
+/// workflow id: it failed before it began.
+pub fn was_refused_id_in_use(run: &WorkflowExecution) -> bool {
+    run.status == "failed"
+        && run
+            .error_details
+            .as_ref()
+            .and_then(|d| d.get("failure_type"))
+            .and_then(Value::as_str)
+            == Some(WORKFLOW_ID_IN_USE)
 }
 
 /// Whether `run` has ended for good: nothing will run it again, so its
@@ -444,7 +474,9 @@ impl ChildOutcomeDelivery {
             ChildOutcome::Completed { result } => {
                 (ChildWorkflowState::Completed, Some(result.clone()), None)
             }
-            ChildOutcome::Failed { error } => (ChildWorkflowState::Failed, None, Some(error)),
+            ChildOutcome::Failed { error } | ChildOutcome::IdInUse { reason: error } => {
+                (ChildWorkflowState::Failed, None, Some(error))
+            }
             ChildOutcome::Canceled { reason } => (ChildWorkflowState::Canceled, None, Some(reason)),
             ChildOutcome::TimedOut { reason } => (ChildWorkflowState::TimedOut, None, Some(reason)),
             ChildOutcome::Terminated { reason } => {

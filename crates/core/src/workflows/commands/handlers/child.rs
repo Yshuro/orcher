@@ -7,12 +7,17 @@ use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::engine::dispatch::PollingManager;
+use crate::workflows::execution::was_refused_id_in_use;
 use crate::workflows::retry::convert_retry_policy;
 use crate::workflows::{ChildRunSettings, ChildWorkflowManager, RunTimeouts};
 
 /// Handle StartChildWorkflow command
 ///
 /// Routes to ChildWorkflowManager to create child workflow execution.
+///
+/// Returns the execution id of the child's run when it was refused because
+/// another open run holds its workflow id: the parent is to be told of that
+/// ending once the completion that started it is applied.
 pub async fn handle_start_child_workflow(
     child_workflow_manager: &Arc<ChildWorkflowManager>,
     polling_manager: &Option<Arc<PollingManager>>,
@@ -20,7 +25,7 @@ pub async fn handle_start_child_workflow(
     execution_id: &str,
     parent_namespace: &str,
     command: &Command,
-) -> OrcherResult<()> {
+) -> OrcherResult<Option<String>> {
     debug!(
         workflow_id = %workflow_id,
         execution_id = %execution_id,
@@ -91,7 +96,7 @@ pub async fn handle_start_child_workflow(
     };
 
     // Route to ChildWorkflowManager
-    child_workflow_manager
+    let run = child_workflow_manager
         .handle_start_child_workflow(
             workflow_id,
             execution_id,
@@ -125,6 +130,10 @@ pub async fn handle_start_child_workflow(
         "StartChildWorkflow command processed"
     );
 
+    if let Some(run) = run.filter(was_refused_id_in_use) {
+        return Ok(Some(run.execution_id));
+    }
+
     // Notify waiting services that new work is available on the child's task queue
     if let Some(ref polling_manager) = polling_manager {
         polling_manager
@@ -139,7 +148,7 @@ pub async fn handle_start_child_workflow(
         );
     }
 
-    Ok(())
+    Ok(None)
 }
 
 /// Handle CancelChildWorkflow command

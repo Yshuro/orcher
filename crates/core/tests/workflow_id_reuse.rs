@@ -433,52 +433,68 @@ async fn a_failure_waiting_for_its_retry_still_holds_the_id() {
     forget(&pool, &workflow_id).await;
 }
 
-/// A child's workflow id is its parent's name for it ("child_0"), unique per
-/// parent: two parents each running their child_0 is correct, and neither is
-/// in the way of a top-level workflow that happens to share the name.
+/// A child holds its workflow id as a top-level run does: while it is open,
+/// a second child under the id is refused, and so is a top-level start. It
+/// used to hold nothing, so two parents' children ran under one id at once,
+/// and a top-level run beside them, and the id named none of them reliably.
 #[tokio::test]
 #[ignore] // Requires PostgreSQL
-async fn children_of_one_name_run_side_by_side() {
+async fn a_child_holds_its_id_like_any_run() {
     let pool = pool().await;
     let (service, executions) = services(&pool);
     let organization = organization(&pool).await;
     let child_id = format!("child-{}", Uuid::new_v4());
 
     let mut parents = Vec::new();
+    let mut started = Vec::new();
     for _ in 0..2 {
         let parent_id = format!("parent-{}", Uuid::new_v4());
         let parent = start(&service, start_as(organization, &parent_id))
             .await
             .expect("a parent");
-        executions
-            .start_workflow(
-                orcher_core::workflows::RunStart {
-                    workflow_name: "orders".to_string(),
-                    workflow_version: "1.0".to_string(),
-                    namespace: NAMESPACE.to_string(),
-                    task_queue: "q".to_string(),
-                    input: serde_json::Value::Null,
-                    workflow_id: Some(child_id.clone()),
-                    labels: None,
-                    max_retries: None,
-                    retry_policy: None,
-                    timeouts: orcher_core::workflows::RunTimeouts::default(),
-                    annotations: None,
-                    start_delay: None,
-                    request_id: None,
-                },
-                Some(parent.execution_id.clone()),
-                Some(organization),
-            )
-            .await
-            .expect("each parent starts its own child of the same name");
+        started.push(
+            executions
+                .start_workflow(
+                    orcher_core::workflows::RunStart {
+                        workflow_name: "orders".to_string(),
+                        workflow_version: "1.0".to_string(),
+                        namespace: NAMESPACE.to_string(),
+                        task_queue: "q".to_string(),
+                        input: serde_json::Value::Null,
+                        workflow_id: Some(child_id.clone()),
+                        labels: None,
+                        max_retries: None,
+                        retry_policy: None,
+                        timeouts: orcher_core::workflows::RunTimeouts::default(),
+                        annotations: None,
+                        start_delay: None,
+                        request_id: None,
+                    },
+                    Some(parent.execution_id.clone()),
+                    Some(organization),
+                )
+                .await,
+        );
         parents.push(parent_id);
     }
+    let first = started.remove(0).expect("the first parent's child");
+    assert!(first.holds_workflow_id, "a child holds its workflow id");
+    let second = started
+        .remove(0)
+        .expect_err("a second child under an open child's id");
+    assert!(
+        orcher_storage::repositories::domains::workflow_execution::is_workflow_id_held(&second),
+        "refused by the hold: {second}"
+    );
 
-    start(&service, start_as(organization, &child_id))
+    let refused = start(&service, start_as(organization, &child_id))
         .await
-        .expect("a top-level workflow sharing a child's name");
-    assert_eq!(executions_of(&pool, organization, &child_id).await, 3);
+        .expect_err("a top-level start under an open child's id");
+    assert_eq!(
+        execution_in_the_way(&refused).as_deref(),
+        Some(first.execution_id.as_str())
+    );
+    assert_eq!(executions_of(&pool, organization, &child_id).await, 1);
 
     forget(&pool, &child_id).await;
     for parent_id in parents {

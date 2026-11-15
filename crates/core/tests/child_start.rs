@@ -10,6 +10,11 @@
 //!   If creating the execution failed, every replay found the record and
 //!   reported the child started, and the parent waited on nothing. A replay
 //!   now creates the missing execution.
+//! - A child holds its workflow id in its namespace, as a top-level run does.
+//!   It used to hold nothing, so children of two parents ran under one id at
+//!   once and a child could take the id of an open top-level run. A child
+//!   started under an id another open run holds is refused, and its parent
+//!   told so as of a child that failed.
 //!
 //! Requires PostgreSQL. Run with:
 //!
@@ -190,6 +195,59 @@ impl Engine {
             .map(|_| ())
     }
 
+    /// An open top-level run holding `workflow_id`, as a start writes one.
+    async fn open_run_holding(&self, workflow_id: &str) -> (Uuid, String) {
+        let id = Uuid::new_v4();
+        let execution_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            r#"
+            INSERT INTO workflow_executions (
+                id, execution_id, workflow_id, workflow_name, workflow_version, namespace,
+                task_queue, status, parameters, context, environment, progress,
+                total_steps, completed_steps, failed_steps, retried_steps, holds_workflow_id
+            )
+            VALUES ($1, $2, $3, 'holder', '1.0.0', $4, $5, 'running', '{}', '{}', '{}', '{}',
+                    0, 0, 0, 0, TRUE)
+            "#,
+        )
+        .bind(id)
+        .bind(&execution_id)
+        .bind(workflow_id)
+        .bind(NAMESPACE)
+        .bind(TASK_QUEUE)
+        .execute(&self.pool)
+        .await
+        .expect("insert the run holding the id");
+        (id, execution_id)
+    }
+
+    /// The child run `parent_execution_id` started: its id, status and
+    /// whether it holds its workflow id.
+    async fn child(&self, parent_execution_id: &str) -> (Uuid, String, String, bool) {
+        sqlx::query_as(
+            "SELECT id, execution_id, status, holds_workflow_id FROM workflow_executions \
+             WHERE parent_execution_id = $1",
+        )
+        .bind(parent_execution_id)
+        .fetch_one(&self.pool)
+        .await
+        .expect("read the child")
+    }
+
+    /// The failure type and reason of the child outcome in the parent's
+    /// journal, if one is there.
+    async fn child_failure(&self, parent_execution_id: &str) -> Option<(String, String)> {
+        sqlx::query_as(
+            "SELECT payload->>'failure_type', payload->>'failure_reason' \
+             FROM workflow_execution_journal \
+             WHERE execution_id = $1 AND event_type = 'ChildWorkflowExecutionFailed'",
+        )
+        .bind(parent_execution_id)
+        .fetch_optional(&self.pool)
+        .await
+        .expect("read the child outcome")
+    }
+
     async fn status(&self, execution_id: &str) -> String {
         sqlx::query_scalar("SELECT status FROM workflow_executions WHERE execution_id = $1")
             .bind(execution_id)
@@ -359,4 +417,124 @@ async fn a_child_recorded_without_an_execution_is_created_on_replay() {
 
     engine.cleanup(&[id]).await;
     engine.cleanup(&children).await;
+}
+
+#[tokio::test]
+#[ignore] // Requires PostgreSQL
+async fn a_child_cannot_take_the_id_an_open_run_holds() {
+    let engine = Engine::new().await;
+    let workflow_id = format!("order-{}", Uuid::new_v4());
+    let (holder, holder_execution_id) = engine.open_run_holding(&workflow_id).await;
+    let (parent, parent_execution_id) = engine.claimed_workflow("parent-taken-id").await;
+
+    engine
+        .complete(
+            parent,
+            &parent_execution_id,
+            vec![start_child(&workflow_id, b"{}")],
+        )
+        .await
+        .expect("a refused child does not fail the completion");
+
+    let (child, _, status, holds) = engine.child(&parent_execution_id).await;
+    assert_eq!(status, "failed", "the child must not run under a held id");
+    assert!(!holds, "a refused child holds nothing");
+    assert_eq!(engine.status(&holder_execution_id).await, "running");
+
+    let (failure_type, reason) = engine
+        .child_failure(&parent_execution_id)
+        .await
+        .expect("the parent must be told its child was refused, without waiting for the sweep");
+    assert_eq!(failure_type, "ChildWorkflowIdInUse");
+    assert!(
+        reason.contains(&workflow_id) && reason.contains(&holder_execution_id),
+        "the reason must name the id and the run holding it: {reason:?}"
+    );
+
+    // The id still names the run holding it, not the later child refused
+    // for starting under it.
+    let found = WorkflowExecutionRepository::new(engine.pool.clone())
+        .find_run(
+            orcher_storage::repositories::domains::workflow_execution::RunRef {
+                organization_id: None,
+                namespace: NAMESPACE,
+                workflow_id: &workflow_id,
+                execution_id: "",
+            },
+        )
+        .await
+        .expect("find the run")
+        .expect("the id names a run");
+    assert_eq!(found.execution_id, holder_execution_id);
+
+    engine.cleanup(&[parent, holder, child]).await;
+}
+
+#[tokio::test]
+#[ignore] // Requires PostgreSQL
+async fn two_parents_cannot_run_children_under_one_id() {
+    let engine = Engine::new().await;
+    let workflow_id = format!("shared-child-{}", Uuid::new_v4());
+    let (first, first_execution_id) = engine.claimed_workflow("parent-first").await;
+    let (second, second_execution_id) = engine.claimed_workflow("parent-second").await;
+
+    engine
+        .complete(
+            first,
+            &first_execution_id,
+            vec![start_child(&workflow_id, b"{}")],
+        )
+        .await
+        .expect("first parent starts its child");
+    let (first_child, first_child_execution_id, status, holds) =
+        engine.child(&first_execution_id).await;
+    assert_eq!(status, "running");
+    assert!(holds, "a child holds its workflow id");
+
+    engine
+        .complete(
+            second,
+            &second_execution_id,
+            vec![start_child(&workflow_id, b"{}")],
+        )
+        .await
+        .expect("second parent's completion");
+    let (second_child, _, status, _) = engine.child(&second_execution_id).await;
+    assert_eq!(
+        status, "failed",
+        "a second child must not run under an id an open child holds"
+    );
+    let (failure_type, reason) = engine
+        .child_failure(&second_execution_id)
+        .await
+        .expect("the second parent must be told");
+    assert_eq!(failure_type, "ChildWorkflowIdInUse");
+    assert!(reason.contains(&first_child_execution_id), "{reason:?}");
+    assert!(
+        engine.child_failure(&first_execution_id).await.is_none(),
+        "the first parent's child is running; it has nothing to be told"
+    );
+
+    // Once the first child is over, the id is free to start under again.
+    sqlx::query("UPDATE workflow_executions SET status = 'completed' WHERE id = $1")
+        .bind(first_child)
+        .execute(&engine.pool)
+        .await
+        .expect("finish the first child");
+    let (third, third_execution_id) = engine.claimed_workflow("parent-third").await;
+    engine
+        .complete(
+            third,
+            &third_execution_id,
+            vec![start_child(&workflow_id, b"{}")],
+        )
+        .await
+        .expect("third parent starts its child");
+    let (third_child, _, status, holds) = engine.child(&third_execution_id).await;
+    assert_eq!(status, "running", "a closed child no longer holds its id");
+    assert!(holds);
+
+    engine
+        .cleanup(&[first, second, third, first_child, second_child, third_child])
+        .await;
 }

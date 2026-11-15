@@ -91,7 +91,7 @@ GUARDS=(
   "Tenancy — a batch acts on one organisation's work|--test batch_status_skips_terminal -- --ignored --test-threads=1"
   "Lifecycle — worker health and the silent-worker sweep|--lib worker::repository -- --ignored --test-threads=1"
   "Journal — concurrent appends all land, a repeated outcome lands once|--lib journal::repository -- --ignored --test-threads=1"
-  "Children — a refused start fails the parent, a half-recorded start converges|--test child_start -- --ignored --test-threads=1"
+  "Children — a refused start fails the parent, a half-recorded start converges, a child holds its workflow id and one started under a held id is refused to its parent|--test child_start -- --ignored --test-threads=1"
   "Children — a child's outcome reaches its real parent once|--test child_lifecycle -- --ignored --test-threads=1"
   "Sessions — a dead session's tasks are failed and their workflows woken|--lib retries::timeout_watcher -- --ignored --test-threads=1"
   "Tenancy — an event by workflow id reaches only the caller's own workflow (lookup)|--lib a_workflow_id_resolves_to_the_callers_own_workflow -- --ignored"

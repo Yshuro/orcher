@@ -179,6 +179,18 @@ fn fail_workflow_non_retryable(command: &Command) -> bool {
     }
 }
 
+/// What one command produced that its caller acts on after the completion
+/// carrying it is applied.
+enum CommandOutput {
+    /// Nothing to act on.
+    Nothing,
+    /// A task, which may be handed to the completing worker at once.
+    Task(Box<TaskExecution>),
+    /// A child refused because another open run holds its workflow id: the
+    /// execution id of its run, whose ending the parent is to be told.
+    RefusedChild(String),
+}
+
 impl CommandProcessor {
     /// Create a new command processor
     ///
@@ -377,7 +389,11 @@ impl CommandProcessor {
                 .process_single_command_with_result(workflow_id, execution_id, namespace, command)
                 .await
             {
-                Ok(Some(task_execution)) => {
+                Ok(CommandOutput::RefusedChild(child_execution_id)) => {
+                    result.refused_children.push(child_execution_id);
+                    result.commands_processed += 1;
+                }
+                Ok(CommandOutput::Task(task_execution)) => {
                     debug!(
                         workflow_id = %workflow_id,
                         execution_id = %execution_id,
@@ -385,10 +401,10 @@ impl CommandProcessor {
                         task_execution_id = %task_execution.id,
                         "EAGER_TASK: Captured scheduled task for eager return"
                     );
-                    result.scheduled_tasks.push(task_execution);
+                    result.scheduled_tasks.push(*task_execution);
                     result.commands_processed += 1;
                 }
-                Ok(None) => {
+                Ok(CommandOutput::Nothing) => {
                     result.commands_processed += 1;
                 }
                 // A command refused as invalid is refused again on every
@@ -423,6 +439,9 @@ impl CommandProcessor {
                     // Nothing scheduled by this batch is handed out for a
                     // workflow that has just failed.
                     result.scheduled_tasks.clear();
+                    // Nor is a child refused before it told to a parent
+                    // that has just failed; the sweep settles its row.
+                    result.refused_children.clear();
                     return Ok(result);
                 }
                 Err(e) => {
@@ -451,32 +470,51 @@ impl CommandProcessor {
         Ok(result)
     }
 
-    /// Process a single command and optionally return a scheduled task
+    /// Process a single command, returning what it produced that the caller
+    /// acts on once the completion is applied.
     async fn process_single_command_with_result(
         &self,
         workflow_id: &str,
         execution_id: &str,
         namespace: &str,
         command: &Command,
-    ) -> OrcherResult<Option<TaskExecution>> {
+    ) -> OrcherResult<CommandOutput> {
         match CommandType::try_from(command.command_type) {
-            Ok(CommandType::ScheduleTask) => {
-                handlers::task::handle_schedule_task_with_result(
-                    &self.journal_service,
-                    &self.task_execution_repository,
-                    &self.coordinator,
-                    &self.logs_repository,
+            Ok(CommandType::StartChildWorkflow) => Ok(
+                match handlers::child::handle_start_child_workflow(
+                    &self.child_workflow_manager,
+                    &self.polling_manager,
                     workflow_id,
                     execution_id,
                     namespace,
                     command,
                 )
-                .await
-            }
+                .await?
+                {
+                    Some(refused) => CommandOutput::RefusedChild(refused),
+                    None => CommandOutput::Nothing,
+                },
+            ),
+            Ok(CommandType::ScheduleTask) => handlers::task::handle_schedule_task_with_result(
+                &self.journal_service,
+                &self.task_execution_repository,
+                &self.coordinator,
+                &self.logs_repository,
+                workflow_id,
+                execution_id,
+                namespace,
+                command,
+            )
+            .await
+            .map(|task| {
+                task.map_or(CommandOutput::Nothing, |task| {
+                    CommandOutput::Task(Box::new(task))
+                })
+            }),
             _ => {
                 self.process_single_command(workflow_id, execution_id, namespace, command)
                     .await?;
-                Ok(None)
+                Ok(CommandOutput::Nothing)
             }
         }
     }
@@ -506,17 +544,18 @@ impl CommandProcessor {
         );
 
         match CommandType::try_from(command.command_type) {
-            Ok(CommandType::StartChildWorkflow) => {
-                handlers::child::handle_start_child_workflow(
-                    &self.child_workflow_manager,
-                    &self.polling_manager,
-                    workflow_id,
-                    execution_id,
-                    namespace,
-                    command,
-                )
-                .await
-            }
+            // A refused child is told to its parent by the reconciliation
+            // sweep on this path; the one with a result tells it at once.
+            Ok(CommandType::StartChildWorkflow) => handlers::child::handle_start_child_workflow(
+                &self.child_workflow_manager,
+                &self.polling_manager,
+                workflow_id,
+                execution_id,
+                namespace,
+                command,
+            )
+            .await
+            .map(|_| ()),
             Ok(CommandType::ScheduleTask) => {
                 handlers::task::handle_schedule_task(
                     &self.journal_service,

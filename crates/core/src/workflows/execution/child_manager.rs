@@ -3,6 +3,7 @@
 use orcher_common::OrcherResult;
 use orcher_storage::repositories::domains::child_workflow::ChildWorkflowRepository;
 use orcher_storage::schema::types::child_workflow::{ChildWorkflowExecution, OrphanPolicy};
+use orcher_storage::schema::types::execution::WorkflowExecution;
 use serde_json::Value;
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
@@ -86,7 +87,9 @@ impl ChildWorkflowManager {
     ///
     /// # Returns
     ///
-    /// The created child workflow execution
+    /// The child's run, when this call made it: the run started, or the run
+    /// recorded as refused because its workflow id is held by another open
+    /// run. `None` when the child had been started before.
     #[instrument(skip(self, input, settings), fields(
         parent_workflow_id = %parent_workflow_id,
         parent_execution_id = %parent_execution_id,
@@ -105,7 +108,7 @@ impl ChildWorkflowManager {
         input: Value,
         orphan_policy: OrphanPolicy,
         settings: ChildRunSettings,
-    ) -> OrcherResult<ChildWorkflowExecution> {
+    ) -> OrcherResult<Option<WorkflowExecution>> {
         info!(
             parent_workflow_id = %parent_workflow_id,
             parent_execution_id = %parent_execution_id,
@@ -168,7 +171,8 @@ impl ChildWorkflowManager {
                             child_workflow_id = %child_workflow_id,
                             "Child was recorded but its execution was never created; creating it now"
                         );
-                        self.workflow_execution_service
+                        let run = self
+                            .workflow_execution_service
                             .start_child_workflow(
                                 &existing.child_execution_id,
                                 child_workflow_id,
@@ -181,6 +185,7 @@ impl ChildWorkflowManager {
                                 settings,
                             )
                             .await?;
+                        return Ok(Some(run));
                     }
                 }
             }
@@ -191,7 +196,7 @@ impl ChildWorkflowManager {
                 child_execution_id = %existing.child_execution_id,
                 "Child workflow already started for this parent; returning existing (idempotent start)"
             );
-            return Ok(existing);
+            return Ok(None);
         }
 
         // The child's execution id, chosen here so the record and the
@@ -236,7 +241,7 @@ impl ChildWorkflowManager {
             orphan_policy,
         );
 
-        let created = self.repository.create(&child).await?;
+        self.repository.create(&child).await?;
 
         info!(
             parent_workflow_id = %parent_workflow_id,
@@ -249,7 +254,8 @@ impl ChildWorkflowManager {
 
         // Start the child workflow execution
         // This creates the workflow execution record and queues it for service pickup
-        self.workflow_execution_service
+        let run = self
+            .workflow_execution_service
             .start_child_workflow(
                 &child_execution_id,
                 child_workflow_id,
@@ -281,7 +287,7 @@ impl ChildWorkflowManager {
             "Child workflow execution started and queued for service pickup"
         );
 
-        Ok(created)
+        Ok(Some(run))
     }
 
     /// Ask for the cancellation of the child `parent_execution_id` started as

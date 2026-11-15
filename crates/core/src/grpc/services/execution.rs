@@ -2334,6 +2334,16 @@ impl ExecutionService {
                 .await;
         }
 
+        // Children this completion started that were refused, their workflow
+        // id held by another open run. Their runs ended as they were written;
+        // the parent is told now that the completion is applied, as of a child
+        // that finished at once. Told while it was being applied, the wake-up
+        // would wait on the parent's row this completion held.
+        for child_execution_id in &processing_result.refused_children {
+            self.notify_parent_of_child_outcome(child_execution_id)
+                .await;
+        }
+
         debug!(
             workflow_id = %req.workflow_id,
             execution_id = %req.execution_id,
