@@ -294,23 +294,6 @@ impl OutboxQueue {
         self.repository.get_metrics().await
     }
 
-    /// Get the number of pending tasks for a specific workflow
-    ///
-    /// # Arguments
-    ///
-    /// * `workflow_id` - The workflow ID
-    ///
-    /// # Returns
-    ///
-    /// Number of pending tasks
-    pub async fn get_pending_count_for_workflow(&self, workflow_id: Uuid) -> OrcherResult<i64> {
-        let tasks = self
-            .repository
-            .list_pending_for_workflow(workflow_id)
-            .await?;
-        Ok(tasks.len() as i64)
-    }
-
     /// List pending tasks for a workflow
     ///
     /// # Arguments
