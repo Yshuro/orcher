@@ -272,6 +272,15 @@ payload_max_bytes = 8388608
 # audience = "orcher"                              # must be in the tokens' `aud`
 # organization_claim = "org_id"                    # claim naming the caller's organization
 # leeway_secs = 60                                 # allowed clock difference
+#
+# TLS for the gRPC API. With auth_mode = "mtls" or "api-key-and-mtls" the
+# client certificate is the credential, so require_client_cert must be true and
+# ca_cert_path must name the CA client certificates are verified against.
+# [security.tls]
+# cert_path = "/etc/orcher/tls/server.crt"
+# key_path = "/etc/orcher/tls/server.key"
+# ca_cert_path = "/etc/orcher/tls/ca.crt"
+# require_client_cert = true
 
 # The dashboard, served on http_addr after the REST API, health and metrics:
 # any other path is the dashboard, which calls the REST API from the browser
