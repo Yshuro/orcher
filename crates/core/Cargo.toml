@@ -19,7 +19,7 @@ orcher-monitoring = { path = "../monitoring" }
 orcher-dispatch = { path = "../dispatch" }
 
 orcher-events = { path = "../events", features = ["bus", "publisher", "storage", "projections"] }
-orcher-proto = "0.15"
+orcher-proto = "0.16"
 
 # Cluster ownership + routing types (ShardOwnership for the write-path fencing
 # guard; ShardRouter for per-shard pool selection). The `storage` feature exposes

@@ -17,7 +17,7 @@ orcher-common = { path = "../../crates/common" }
 orcher-storage = { path = "../../crates/storage" }
 orcher-events = { path = "../../crates/events", features = ["storage"] }
 orcher-monitoring = { path = "../../crates/monitoring" }
-orcher-proto = "0.15"
+orcher-proto = "0.16"
 orcher-dispatch = { path = "../../crates/dispatch" }
 orcher-cluster = { path = "../../crates/cluster", features = ["storage"] }
 orcher-server = { path = "../../crates/server" }

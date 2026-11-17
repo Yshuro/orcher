@@ -16,7 +16,7 @@ readme = "README.md"
 orcher-common = { workspace = true }
 orcher-storage = { workspace = true }
 orcher-core = { workspace = true }
-orcher-proto = "0.15"
+orcher-proto = "0.16"
 
 # gRPC dependencies
 tonic = { version = "0.12", features = ["transport", "tls", "prost"] }

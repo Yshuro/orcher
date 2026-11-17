@@ -213,6 +213,7 @@ impl Converter {
         let response = PollExecutionResponse {
             workflow_id: execution.id.as_uuid().to_string(),
             execution_id: execution.execution_id.clone(), // Use the external-facing execution_id (e.g., "exec_uuid")
+            client_workflow_id: execution.client_workflow_id().to_string(),
             workflow_type: execution.workflow_type.clone(),
             task_queue: execution.task_queue.clone(),
             namespace: execution.namespace.clone(),
