@@ -427,10 +427,7 @@ fn final_result_response(
 
     Some(GetWorkflowResultResponse {
         execution: Some(WorkflowExecution {
-            workflow_id: execution
-                .workflow_id
-                .clone()
-                .unwrap_or_else(|| execution.execution_id.clone()),
+            workflow_id: execution.client_workflow_id().to_string(),
             execution_id: execution.execution_id.clone(),
         }),
         status: status as i32,
@@ -687,10 +684,7 @@ fn start_response(
 ) -> StartWorkflowResponse {
     let started_at = execution.clocks_start_at();
     StartWorkflowResponse {
-        workflow_id: execution
-            .workflow_id
-            .clone()
-            .unwrap_or_else(|| execution.execution_id.clone()),
+        workflow_id: execution.client_workflow_id().to_string(),
         execution_id: execution.execution_id.clone(),
         started_at: Some(prost_types::Timestamp {
             seconds: started_at.timestamp(),
@@ -1057,10 +1051,7 @@ impl WorkflowServiceTrait for WorkflowService {
         let mut response = GetWorkflowStatusResponse {
             status: status as i32,
             execution: Some(WorkflowExecution {
-                workflow_id: execution
-                    .workflow_id
-                    .clone()
-                    .unwrap_or_else(|| execution.execution_id.clone()),
+                workflow_id: execution.client_workflow_id().to_string(),
                 execution_id: execution.execution_id.clone(),
             }),
             started_at,

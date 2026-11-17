@@ -418,6 +418,13 @@ impl WorkflowExecution {
         retryable && self.retry_count < self.max_retries && self.retries_settled_at.is_none()
     }
 
+    /// The workflow id clients know this run by: the one it was started with,
+    /// or, for a run started without one, its `execution_id`, which is what
+    /// the start answered with. `id` is the engine's own id for the run.
+    pub fn client_workflow_id(&self) -> &str {
+        self.workflow_id.as_deref().unwrap_or(&self.execution_id)
+    }
+
     /// When this run's clocks start: when a delayed start is due
     /// ([`start_after`](Self::start_after)), and otherwise when the run was
     /// submitted. The run timeout is measured from here, and a start's

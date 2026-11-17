@@ -4,7 +4,15 @@ What changes for an existing deployment or client when you move to a release,
 beyond the bug fixes listed in [CHANGELOG.md](CHANGELOG.md). Read the section
 for every release between the one you run and the one you are moving to.
 
-## Unreleased (after 0.7.1)
+## Unreleased (after 0.7.2)
+
+- Workflow polls carry `client_workflow_id` (orcher-proto 0.16): the workflow
+  id clients know the run by, the one it was started with or, for a run
+  started without one, its `execution_id`. A poll's `workflow_id` is
+  unchanged: it is still the engine's own id for the run, and still the one
+  a completion sends back. Task polls send the new field empty for now (#56).
+
+## 0.7.2
 
 - A child workflow now holds its workflow id in its namespace, as a top-level
   run does: while it is open, no other run there may start under that id. A

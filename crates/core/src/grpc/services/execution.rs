@@ -1512,6 +1512,7 @@ impl ExecutionService {
             start_to_close_timeout: None,
             heartbeat_timeout: None,
             retry_policy: None,
+            client_workflow_id: String::new(),
         }
     }
 
@@ -1793,6 +1794,7 @@ impl ExecutionService {
             start_to_close_timeout,
             heartbeat_timeout,
             retry_policy,
+            client_workflow_id: String::new(),
         };
 
         Ok(Response::new(response))
@@ -1936,6 +1938,7 @@ impl ExecutionService {
             start_to_close_timeout,
             heartbeat_timeout,
             retry_policy,
+            client_workflow_id: String::new(),
         };
 
         Ok(Response::new(response))
@@ -2052,6 +2055,7 @@ impl ExecutionService {
             start_to_close_timeout,
             heartbeat_timeout,
             retry_policy,
+            client_workflow_id: String::new(),
         })
     }
 
@@ -3098,6 +3102,7 @@ impl ExecutionServiceTrait for ExecutionService {
             step_ids: poll_response.step_id_scheme.map_or(0, i32::from),
             history_lineage: poll_response.history_lineage.clone(),
             history_after_entry_id: poll_response.history_after_entry_id,
+            client_workflow_id: poll_response.client_workflow_id.clone(),
         };
 
         info!(

@@ -1155,6 +1155,7 @@ mod tests {
             history_lineage: String::new(),
             step_results_journaled: true,
             history_after_entry_id: 0,
+            client_workflow_id: String::new(),
         }
     }
 

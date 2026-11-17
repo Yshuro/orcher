@@ -2611,9 +2611,9 @@ dependencies = [
 
 [[package]]
 name = "orcher-proto"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "118e84bc3f0a540bff63ed77735289961bf119ea98b818db3af8fd8dfb4a1f43"
+checksum = "51b149e1617a67ee71a05d64ce77375bf4b0d09f5ea4f896d40d80005d0051c9"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",

@@ -146,6 +146,11 @@ pub struct PollExecutionResponse {
     /// sent before.
     #[serde(default)]
     pub history_after_entry_id: i64,
+    /// The workflow id clients know the run by: the one it was started with,
+    /// or, for a run started without one, its `execution_id`, as the start
+    /// response reported. `workflow_id` is the engine's own id for the run.
+    #[serde(default)]
+    pub client_workflow_id: String,
 }
 
 /// Single event in the execution journal.
