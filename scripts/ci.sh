@@ -201,7 +201,14 @@ case "${1:-all}" in
   check) run_check ;;
   guards) run_guards ;;
   contract) run_contract ;;
-  all) run_check && run_guards && run_contract ;;
+  # One stage after another, not `run_check && run_guards && ...`: bash
+  # ignores `set -e` inside a function called from an && list, so a failing
+  # step there, rustfmt or clippy among them, would not stop the run.
+  all)
+    run_check
+    run_guards
+    run_contract
+    ;;
   *)
     echo "usage: scripts/ci.sh [all|check|guards|contract]" >&2
     exit 2
