@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.3](https://github.com/orcher-io/orcher/compare/v0.7.2...v0.7.3) (2026-11-18)
+
+
+### Bug Fixes
+
+* **ci:** stop scripts/ci.sh all at the first failing step ([defca8b](https://github.com/orcher-io/orcher/commit/defca8b3468563c914fe326b86dc99cde525427c))
+* **ci:** stop scripts/ci.sh all at the first failing step ([369356a](https://github.com/orcher-io/orcher/commit/369356a4f0830200cf84beb89677e296c2b0b154))
+* name a polled run by the workflow id clients know it by ([e0e5c9a](https://github.com/orcher-io/orcher/commit/e0e5c9a74c29d10e6b972b354114c94a77338448))
+* name a polled run by the workflow id clients know it by ([f33c3c6](https://github.com/orcher-io/orcher/commit/f33c3c631bc90a55573473a279a8fe1bf4ef3747)), closes [#4](https://github.com/orcher-io/orcher/issues/4)
+
 ## [0.7.2](https://github.com/orcher-io/orcher/compare/v0.7.1...v0.7.2) (2026-11-15)
 
 
