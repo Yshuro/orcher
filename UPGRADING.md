@@ -10,7 +10,15 @@ for every release between the one you run and the one you are moving to.
   id clients know the run by, the one it was started with or, for a run
   started without one, its `execution_id`. A poll's `workflow_id` is
   unchanged: it is still the engine's own id for the run, and still the one
-  a completion sends back. Task polls send the new field empty for now (#56).
+  a completion sends back.
+- Task polls carry `client_workflow_id` too, and so do tasks returned eagerly
+  with an activation, naming the task's run the same way (#56). Workers on
+  sdk-core 0.23.2 and later tell task code this id rather than the engine's
+  UUID, which they still fall back to against an older engine. Task code that
+  builds an idempotency key from its workflow id gets a different key for an
+  attempt that runs after the upgrade than for one that ran before it: let a
+  task whose attempts may straddle the upgrade finish first, or key it by
+  something other than the workflow id.
 
 ## 0.7.2
 

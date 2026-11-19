@@ -3074,6 +3074,23 @@ impl WorkflowExecutionRepository {
         Ok(requested.flatten())
     }
 
+    /// The workflow id clients know the run with internal id `id` by: the one
+    /// it was started with, or for a run started without one, its execution
+    /// id, as [`WorkflowExecution::client_workflow_id`] reads it. `None` when
+    /// there is no such run.
+    ///
+    /// Reads the two ids alone, for a task poll that names the run its task
+    /// belongs to and needs nothing else of it.
+    pub async fn client_workflow_id(&self, id: Uuid) -> OrcherResult<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT COALESCE(workflow_id, execution_id) FROM workflow_executions WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool_for(None, id))
+        .await
+        .map_err(|e| OrcherError::internal(format!("Failed to read the run's workflow id: {}", e)))
+    }
+
     /// Cancel an execution, refusing to overwrite a terminal state.
     ///
     /// Returns `true` when a row moved to cancelled, `false` when there was
