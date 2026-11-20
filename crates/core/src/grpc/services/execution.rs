@@ -835,17 +835,54 @@ impl ExecutionService {
         Err(Status::invalid_argument(reason))
     }
 
-    /// `response`, if the worker that polled can receive it. A task larger
-    /// than that would be refused by the worker's own gRPC stack on arrival,
-    /// and the attempt would wait out its timeout and be handed out again,
-    /// refused the same way each time; it is failed instead, non-retryably,
-    /// saying why, and the poll is answered with no work.
+    /// The workflow id the users of the run with internal id `workflow_id`
+    /// know it by, for a task poll to name its run by. Empty when it cannot be
+    /// read: a worker then names the run by `workflow_id`, as it did before
+    /// the engine sent this, and the task runs all the same.
+    async fn client_workflow_id_of(&self, workflow_id: &str) -> String {
+        let Ok(id) = uuid::Uuid::parse_str(workflow_id) else {
+            return String::new();
+        };
+        match self
+            .workflow_execution_repository
+            .client_workflow_id(id)
+            .await
+        {
+            Ok(Some(named)) => named,
+            Ok(None) => String::new(),
+            Err(e) => {
+                warn!(
+                    workflow_id = %workflow_id,
+                    error = %e,
+                    "Could not read the workflow id a task's run is known by; \
+                     the worker names it by the engine's id"
+                );
+                String::new()
+            }
+        }
+    }
+
+    /// `response`, if the worker that polled can receive it, naming the run
+    /// its task belongs to by the workflow id the run's users know it by. A
+    /// task larger than that would be refused by the worker's own gRPC stack
+    /// on arrival, and the attempt would wait out its timeout and be handed
+    /// out again, refused the same way each time; it is failed instead,
+    /// non-retryably, saying why, and the poll is answered with no work.
+    ///
+    /// Every task a poll hands out passes through here, however it was
+    /// matched, so the run's id is read here once rather than carried in each
+    /// dispatch: a dispatch written before the engine sent the id is named the
+    /// same way as one written after.
     async fn deliverable_task(
         &self,
         response: Result<Response<PollTaskExecutionResponse>, Status>,
         caller: &PollCaller,
     ) -> Result<Response<PollTaskExecutionResponse>, Status> {
-        let response = response?;
+        let mut response = response?;
+        if !response.get_ref().task_token.is_empty() {
+            let polled = response.get_mut();
+            polled.client_workflow_id = self.client_workflow_id_of(&polled.workflow_id).await;
+        }
         let size = response.get_ref().encoded_len();
         let polled = response.get_ref();
         if polled.task_token.is_empty() || size <= caller.receive_limit {
@@ -1794,6 +1831,7 @@ impl ExecutionService {
             start_to_close_timeout,
             heartbeat_timeout,
             retry_policy,
+            // Named by `deliverable_task`, which every polled task passes.
             client_workflow_id: String::new(),
         };
 
@@ -1938,6 +1976,7 @@ impl ExecutionService {
             start_to_close_timeout,
             heartbeat_timeout,
             retry_policy,
+            // Named by `deliverable_task`, which every polled task passes.
             client_workflow_id: String::new(),
         };
 
@@ -2055,6 +2094,7 @@ impl ExecutionService {
             start_to_close_timeout,
             heartbeat_timeout,
             retry_policy,
+            // Named by the completion that returns it, from the run it reads.
             client_workflow_id: String::new(),
         })
     }
@@ -2570,7 +2610,12 @@ impl ExecutionService {
                             )
                             .await
                         {
-                            eager_responses.push(resp);
+                            // Named by the run's own row, already read: an
+                            // eager task skips the poll that names the others.
+                            eager_responses.push(PollTaskExecutionResponse {
+                                client_workflow_id: workflow.client_workflow_id().to_string(),
+                                ..resp
+                            });
                         }
                     }
                     eager_responses

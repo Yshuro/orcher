@@ -1,4 +1,5 @@
-//! A workflow poll names the run by the workflow id its users know it by.
+//! A poll names the run by the workflow id its users know it by, whether it
+//! hands out the run's workflow or one of its tasks.
 //!
 //! A poll's `workflow_id` is the engine's own id for the run, a UUID, which a
 //! worker sends back with its completion. A worker had nothing else to name
@@ -7,6 +8,11 @@
 //! (orcher-io/orcher#4). A poll now also carries `client_workflow_id`: the id
 //! the run was started with, or, for a run started without one, the id its
 //! start answered with, which is its `execution_id`.
+//!
+//! A task poll sent the field empty (orcher-io/orcher#56), so task code was
+//! told the UUID while the workflow that scheduled it was told the run's own
+//! id. A task now carries it too, polled or returned eagerly with the
+//! activation that scheduled it.
 //!
 //! Requires PostgreSQL. Run with:
 //!
@@ -28,7 +34,11 @@ use orcher_core::workflows::{
 };
 use orcher_events::bus::EventBusConfig;
 use orcher_proto::orcher::v1::execution_service_server::ExecutionService as ExecutionServiceTrait;
-use orcher_proto::orcher::v1::{PollWorkflowExecutionRequest, PollWorkflowExecutionResponse};
+use orcher_proto::orcher::v1::{
+    command, Command, CommandType, CompleteWorkflowExecutionRequest, PollTaskExecutionRequest,
+    PollTaskExecutionResponse, PollWorkflowExecutionRequest, PollWorkflowExecutionResponse,
+    ScheduleTaskCommandAttributes,
+};
 use orcher_storage::repositories::domains::{
     child_workflow::ChildWorkflowRepository, coordination::OutboxRepository,
     journal::JournalRepository, task_execution::TaskExecutionRepository,
@@ -195,10 +205,77 @@ async fn cleanup(pool: &PgPool, task_queue: &str) {
          (SELECT id FROM workflow_executions WHERE task_queue = $1)",
         "DELETE FROM outbox_queue WHERE workflow_id IN \
          (SELECT id FROM workflow_executions WHERE task_queue = $1)",
+        "DELETE FROM task_executions WHERE workflow_id IN \
+         (SELECT id FROM workflow_executions WHERE task_queue = $1)",
         "DELETE FROM workflow_executions WHERE task_queue = $1",
     ] {
         let _ = sqlx::query(q).bind(task_queue).execute(pool).await;
     }
+}
+
+fn schedule(task_id: &str, task_queue: &str) -> Command {
+    Command {
+        command_type: CommandType::ScheduleTask as i32,
+        attributes: Some(command::Attributes::ScheduleTask(
+            ScheduleTaskCommandAttributes {
+                task_id: task_id.to_string(),
+                task_type: "charge".to_string(),
+                task_queue: task_queue.to_string(),
+                input: b"null".to_vec(),
+                ..Default::default()
+            },
+        )),
+    }
+}
+
+/// Answers `activation` with `commands`, from a worker that takes tasks back
+/// eagerly; the tasks returned with the answer.
+async fn answer(
+    engine: &Engine,
+    activation: &PollWorkflowExecutionResponse,
+    commands: Vec<Command>,
+) -> Vec<PollTaskExecutionResponse> {
+    engine
+        .execution
+        .complete_workflow_execution(Request::new(CompleteWorkflowExecutionRequest {
+            workflow_id: activation.workflow_id.clone(),
+            execution_id: activation.execution_id.clone(),
+            namespace: NAMESPACE.to_string(),
+            identity: WORKER.to_string(),
+            stream_entry_id: activation.stream_entry_id.clone(),
+            commands,
+            ..Default::default()
+        }))
+        .await
+        .expect("answer the activation")
+        .into_inner()
+        .eager_tasks
+}
+
+async fn polled_task(engine: &Engine, task_queue: &str) -> PollTaskExecutionResponse {
+    // A poll that claims a dispatch whose task was already taken answers with
+    // nothing, and the worker polls again.
+    for _ in 0..5 {
+        let task = engine
+            .execution
+            .poll_task_execution(Request::new(PollTaskExecutionRequest {
+                task_queue: task_queue.to_string(),
+                namespace: NAMESPACE.to_string(),
+                identity: WORKER.to_string(),
+                poll_timeout: Some(orcher_proto::prost_types::Duration {
+                    seconds: 10,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect("poll for a task")
+            .into_inner();
+        if !task.task_token.is_empty() {
+            return task;
+        }
+    }
+    panic!("no task was handed out on {task_queue}");
 }
 
 #[tokio::test]
@@ -242,6 +319,86 @@ async fn a_run_started_without_an_id_is_named_by_its_execution_id() {
     assert_eq!(
         polled.client_workflow_id, run.execution_id,
         "a run started without an id is named by the id its start answered with"
+    );
+
+    cleanup(&pool, &task_queue).await;
+}
+
+/// A task polled from another queue than its workflow's (a session's, which
+/// no eager return serves) and one returned with the activation that
+/// scheduled it both name their run by the id it was started with.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL
+async fn a_task_names_its_run_by_the_id_the_run_was_started_with() {
+    let pool = pool().await;
+    let engine = engine(&pool).await;
+    let task_queue = format!("client-id-{}", Uuid::new_v4().simple());
+    let session_queue = format!("{task_queue}__session__{WORKER}");
+    let named = format!("order-{}", Uuid::new_v4().simple());
+
+    let run = start(&engine, &task_queue, Some(named.clone())).await;
+    let activation = activation(&engine, &task_queue).await;
+    let eager = answer(
+        &engine,
+        &activation,
+        vec![
+            schedule("charge_0", &task_queue),
+            schedule("charge_1", &session_queue),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        eager.iter().map(|t| t.task_id.as_str()).collect::<Vec<_>>(),
+        ["charge_0"],
+        "the task on the workflow's own queue was not returned eagerly"
+    );
+    assert_eq!(
+        eager[0].client_workflow_id, named,
+        "an eagerly returned task names its run by the id it was started with"
+    );
+    assert_eq!(eager[0].workflow_id, run.id.as_uuid().to_string());
+
+    let polled = polled_task(&engine, &session_queue).await;
+    assert_eq!(polled.task_id, "charge_1");
+    assert_eq!(
+        polled.client_workflow_id, named,
+        "a polled task names its run by the id it was started with"
+    );
+    assert_eq!(
+        polled.workflow_id,
+        run.id.as_uuid().to_string(),
+        "workflow_id stays the engine's own id, which the task's outcome is reported with"
+    );
+
+    cleanup(&pool, &task_queue).await;
+}
+
+#[tokio::test]
+#[ignore] // Requires PostgreSQL
+async fn a_task_of_a_run_started_without_an_id_is_named_by_its_execution_id() {
+    let pool = pool().await;
+    let engine = engine(&pool).await;
+    let task_queue = format!("client-id-{}", Uuid::new_v4().simple());
+    let session_queue = format!("{task_queue}__session__{WORKER}");
+
+    let run = start(&engine, &task_queue, None).await;
+    let activation = activation(&engine, &task_queue).await;
+    let eager = answer(
+        &engine,
+        &activation,
+        vec![schedule("charge_0", &session_queue)],
+    )
+    .await;
+    assert!(
+        eager.is_empty(),
+        "a task on another queue came back eagerly"
+    );
+
+    let polled = polled_task(&engine, &session_queue).await;
+    assert_eq!(
+        polled.client_workflow_id, run.execution_id,
+        "a task of a run started without an id names it by the id its start answered with"
     );
 
     cleanup(&pool, &task_queue).await;
