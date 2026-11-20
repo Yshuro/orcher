@@ -108,6 +108,42 @@ impl TimerRepository {
         })
     }
 
+    /// Cancel this workflow execution's fire-timer task named `timer_name`,
+    /// if it has not fired, within the caller's transaction. Returns whether
+    /// a row was cancelled. A row already claimed for firing is cancelled too:
+    /// the fire it was claimed for refuses a timer whose cancellation is
+    /// journaled, and leaves the row as it found it.
+    pub async fn cancel_fire_timer_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        workflow_id: Uuid,
+        timer_name: &str,
+    ) -> OrcherResult<bool> {
+        sqlx::query(
+            r#"
+            UPDATE timer_queue
+            SET status = 'cancelled',
+                completed_at = NOW()
+            WHERE workflow_id = $1
+              AND task_type = 'fire_timer'
+              AND payload->>'timer_name' = $2
+              AND status IN ('pending', 'processing')
+            "#,
+        )
+        .bind(workflow_id)
+        .bind(timer_name)
+        .execute(&mut **tx)
+        .await
+        .map(|done| done.rows_affected() > 0)
+        .map_err(|e| {
+            error!("Failed to cancel a timer: {}", e);
+            orcher_common::error::OrcherError::Internal {
+                message: format!("Failed to cancel a timer: {}", e),
+                source: None,
+            }
+        })
+    }
+
     /// Create a new timer task within an existing transaction
     pub async fn create_in_tx(
         &self,

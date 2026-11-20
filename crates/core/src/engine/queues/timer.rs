@@ -63,6 +63,19 @@ impl TimerQueue {
             .await
     }
 
+    /// Cancel this workflow execution's fire-timer task named `timer_name`
+    /// if it has not fired (within the caller's transaction).
+    pub async fn cancel_fire_timer_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workflow_id: Uuid,
+        timer_name: &str,
+    ) -> OrcherResult<bool> {
+        self.repository
+            .cancel_fire_timer_in_tx(tx, workflow_id, timer_name)
+            .await
+    }
+
     /// Claim expired timers for processing
     ///
     /// Returns timers that have passed their fire_at time and are ready to execute.

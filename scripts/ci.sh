@@ -143,6 +143,7 @@ GUARDS=(
   "Outbox — the processor reads a handful of rows per row it handles, whatever the backlog of its workflow; it never reads the backlog once per batch|--test outbox_backlog_reads -- --ignored --test-threads=1"
   "Outbox — the outbox is analyzed after a thousand changes however large it is, so its claims are planned for a burst within one autovacuum round|--test outbox_analysis -- --ignored --test-threads=1"
   "Retention — a run's journal is deleted only once the run has ended before the period, as a whole; a running, waiting or retrying run keeps its journal and a retrying run its row|--test retention_keeps_open_journals -- --ignored --test-threads=1"
+  "Timers — a cancelled timer's row is cancelled and a fire after a journaled cancel records nothing; a timer not cancelled is journaled as fired once|--test cancelled_timer -- --ignored --test-threads=1"
   "Sharding — a node claims only outbox rows on the shards it owns, rows from before shards stay claimable, the sweep picks up a row no one owns, no scope claims everything|--test shard_filtered_claims -- --ignored --test-threads=1"
 )
 

@@ -899,6 +899,43 @@ impl WorkflowCoordinator {
         Ok(Some(timer_id))
     }
 
+    /// Cancel the timer `timer_name` of this workflow execution, if it has
+    /// not fired, on the database the timer was scheduled on. Returns whether
+    /// a timer was cancelled: a replay's cancel of a timer cancelled or fired
+    /// already finds nothing to do.
+    pub async fn cancel_timer(&self, workflow_id: Uuid, timer_name: &str) -> OrcherResult<bool> {
+        let mut tx =
+            self.pool_for(workflow_id).begin().await.map_err(|e| {
+                OrcherError::internal(format!("Failed to begin transaction: {}", e))
+            })?;
+        let cancelled = self
+            .timers
+            .cancel_fire_timer_in_tx(&mut tx, workflow_id, timer_name)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|e| OrcherError::internal(format!("Failed to commit transaction: {}", e)))?;
+        if cancelled {
+            // Bookkeeping only, as on scheduling: the cached state's timers
+            // are read by nothing that decides anything.
+            if let Err(e) = self
+                .update_state(workflow_id, |state| {
+                    state.remove_timer(timer_name);
+                    Ok(())
+                })
+                .await
+            {
+                warn!(
+                    workflow_id = %workflow_id,
+                    timer_name = %timer_name,
+                    error = %e,
+                    "Timer cancelled; removing it from the cached state failed (bookkeeping only)"
+                );
+            }
+        }
+        Ok(cancelled)
+    }
+
     /// Handle timer fire event
     ///
     /// Called by the TimerProcessor when a timer fires.
