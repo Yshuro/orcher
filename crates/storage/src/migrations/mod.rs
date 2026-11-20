@@ -455,6 +455,12 @@ pub mod sql {
         /// cancellation stops the tasks scheduled without having seen it.
         pub const V088_TASK_SCHEDULED_THROUGH_ENTRY: &str =
             include_str!("sql/postgres/V088__task_scheduled_through_entry.sql");
+
+        /// V089 — `outbox_queue` is analyzed after a thousand changes rather
+        /// than a tenth of the table, so a burst of pending rows is planned
+        /// for within one autovacuum round, however large the outbox.
+        pub const V089_OUTBOX_ANALYZED_AFTER_A_THOUSAND_CHANGES: &str =
+            include_str!("sql/postgres/V089__outbox_analyzed_after_a_thousand_changes.sql");
     }
 }
 

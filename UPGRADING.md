@@ -14,6 +14,13 @@ for every release between the one you run and the one you are moving to.
   gets a different key for an attempt that runs after the upgrade than for
   one that ran before it: let a task whose attempts may straddle the upgrade
   finish first, or key it by something other than the workflow id.
+- Migration V089 sets `autovacuum_analyze_scale_factor = 0` and
+  `autovacuum_analyze_threshold = 1000` on `outbox_queue`, so the outbox is
+  analyzed after a thousand changes whatever its size and its claims are
+  planned for a burst of pending rows within one autovacuum round (#63). It
+  replaces any value you had set on the table yourself; set yours again
+  after migrating if you want it back. It takes no lock that blocks reads or
+  writes.
 
 ## 0.7.3
 

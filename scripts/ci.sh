@@ -141,6 +141,7 @@ GUARDS=(
   "Dispatch — a poll takes its own queue's oldest task, once, never held back by another queue's; a task handed out leaves nothing to claim until it is put back|--test claim_per_queue -- --ignored --test-threads=1"
   "Outbox — the processor claims the oldest ready rows, several of one workflow at once, never held back by a row another claimer holds or one in backoff|--test outbox_claim_oldest -- --ignored --test-threads=1"
   "Outbox — the processor reads a handful of rows per row it handles, whatever the backlog of its workflow; it never reads the backlog once per batch|--test outbox_backlog_reads -- --ignored --test-threads=1"
+  "Outbox — the outbox is analyzed after a thousand changes however large it is, so its claims are planned for a burst within one autovacuum round|--test outbox_analysis -- --ignored --test-threads=1"
   "Sharding — a node claims only outbox rows on the shards it owns, rows from before shards stay claimable, the sweep picks up a row no one owns, no scope claims everything|--test shard_filtered_claims -- --ignored --test-threads=1"
 )
 
