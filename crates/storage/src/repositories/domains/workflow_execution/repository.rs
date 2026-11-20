@@ -965,7 +965,7 @@ const ENDED: &str =
 /// decided — has ended. "Not yet decided" lasts only between recording a
 /// failure and deciding it; a cancel that lands in that moment is refused, and
 /// the retry goes ahead. A timeout is decided as it is recorded.
-const STILL_LIVE: &str = "(status NOT IN ('completed', 'failed', 'cancelled', 'terminated', \
+pub const STILL_LIVE: &str = "(status NOT IN ('completed', 'failed', 'cancelled', 'terminated', \
      'timed_out', 'restarted_fresh', 'reset') \
      OR (status IN ('failed', 'timed_out') AND retries_settled_at IS NULL \
          AND retry_count < max_retries AND next_retry_at IS NOT NULL))";

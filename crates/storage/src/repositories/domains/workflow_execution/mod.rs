@@ -43,6 +43,6 @@ pub use repository::{
     ActivationFence, CancelRequestTarget, ClaimFailureReason, ClaimStateCheck, DeadNode,
     DeferredResume, DueStart, HandOut, ListExecutionsFilters, PendingRequeueInfo,
     PendingRequeueWorkflow, ReleasedClaim, Resume, RunRef, WorkflowExecutionRepository,
-    DEFAULT_IN_FLIGHT_BOUND_SECS, DEFAULT_JOURNAL_HOLD, START_REQUEST_INDEX,
+    DEFAULT_IN_FLIGHT_BOUND_SECS, DEFAULT_JOURNAL_HOLD, START_REQUEST_INDEX, STILL_LIVE,
     WORKFLOW_ID_HOLD_INDEX,
 };
