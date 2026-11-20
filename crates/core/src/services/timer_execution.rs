@@ -79,15 +79,24 @@ impl TimerExecutionService {
 
         let workflow_id_str = task.workflow_id.to_string();
 
-        // Append TimerFired journal event so replay skips past the sleep step
-        self.journal_service
-            .append_timer_fired(
-                &workflow_id_str,
-                &execution.execution_id,
-                &timer_name,
-                0, // started_event_id is not tracked; replay matches by timer_name
-            )
-            .await?;
+        // Append TimerFired so replay skips past the sleep step, unless the
+        // workflow cancelled the timer first (or the fire is a retry of one
+        // already journaled): then there is nothing to resume, and the
+        // workflow is not woken. Only the run's ending was checked before, so
+        // a cancelled timer fired anyway when it fell due (orcher-io/orcher#52).
+        if !self
+            .journal_service
+            .append_timer_fired_once(&workflow_id_str, &execution.execution_id, &timer_name)
+            .await?
+        {
+            debug!(
+                task_id = %task.task_id,
+                workflow_id = %task.workflow_id,
+                timer_name = %timer_name,
+                "Timer cancelled or already fired; not firing it"
+            );
+            return Ok(());
+        }
 
         // Release the workflow claim so a poller can pick it up
         if let Err(e) = self

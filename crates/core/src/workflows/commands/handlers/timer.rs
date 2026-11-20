@@ -104,10 +104,17 @@ pub async fn handle_start_timer(
 
 /// Handle CancelTimer command
 ///
-/// Cancels a previously started timer by recording a TimerCanceled journal entry.
-/// The timer service checks for cancellation before firing.
+/// Journals TimerCanceled, then cancels the timer's row so it never fires.
+/// The journal entry is what decides: a fire refuses a timer whose
+/// cancellation is journaled (see `TimerExecutionService::fire_timer`), so a
+/// row the timer processor had already claimed when the cancel came, or one
+/// whose cancel this attempt failed to write, is still not fired. This used
+/// to journal the cancellation and nothing else: the row fired when it fell
+/// due, journaled TimerFired after TimerCanceled and woke the workflow for a
+/// replay it did not need (orcher-io/orcher#52).
 pub async fn handle_cancel_timer(
     journal_service: &Arc<JournalService>,
+    coordinator: &Option<Arc<WorkflowCoordinator>>,
     workflow_id: &str,
     execution_id: &str,
     command: &Command,
@@ -131,6 +138,19 @@ pub async fn handle_cancel_timer(
     journal_service
         .append_timer_canceled(workflow_id, execution_id, &attrs.timer_id, 0)
         .await?;
+
+    if let Some(coord) = coordinator {
+        let wf_id = uuid::Uuid::parse_str(workflow_id)
+            .map_err(|e| OrcherError::invalid_input(format!("Invalid workflow_id UUID: {}", e)))?;
+        if !coord.cancel_timer(wf_id, &attrs.timer_id).await? {
+            debug!(
+                workflow_id = %workflow_id,
+                execution_id = %execution_id,
+                timer_id = %attrs.timer_id,
+                "CancelTimer for a timer with nothing left to fire"
+            );
+        }
+    }
 
     info!(
         workflow_id = %workflow_id,

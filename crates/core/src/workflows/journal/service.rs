@@ -950,6 +950,39 @@ impl JournalService {
             .await
     }
 
+    /// Append TimerFired for `timer_id` unless this execution's journal
+    /// already records the timer fired or cancelled. Returns whether it was
+    /// appended. Checked and appended under the execution's journal lock, so
+    /// a cancellation journaled first always wins, and a fire retried after
+    /// it was journaled is recorded once.
+    pub async fn append_timer_fired_once(
+        &self,
+        workflow_id: &str,
+        execution_id: &str,
+        timer_id: &str,
+    ) -> OrcherResult<bool> {
+        let entry = JournalEntry::new(
+            workflow_id.to_string(),
+            execution_id.to_string(),
+            0,
+            "TimerFired".to_string(),
+            serde_json::json!({
+                "timer_id": timer_id,
+                "started_event_id": 0,
+            }),
+        );
+        Ok(self
+            .repository
+            .append_next_once(
+                entry,
+                &["TimerFired", "TimerCanceled"],
+                "timer_id",
+                timer_id,
+            )
+            .await?
+            .is_some())
+    }
+
     /// Append TimerCanceled event
     ///
     /// # Arguments

@@ -583,6 +583,7 @@ impl CommandProcessor {
             Ok(CommandType::CancelTimer) => {
                 handlers::timer::handle_cancel_timer(
                     &self.journal_service,
+                    &self.coordinator,
                     workflow_id,
                     execution_id,
                     command,
