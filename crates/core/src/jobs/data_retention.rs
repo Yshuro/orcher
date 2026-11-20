@@ -2,6 +2,7 @@
 
 use jiff::SignedDuration;
 use orcher_common::types::time::Timestamptz;
+use orcher_storage::repositories::domains::workflow_execution::STILL_LIVE;
 use sqlx::PgPool;
 use std::time::Instant;
 use tracing::{info, warn};
@@ -144,18 +145,22 @@ pub async fn run(pool: &PgPool, config: &RetentionDays) -> Result<(), Box<dyn st
 /// Deletes workflow executions that:
 /// - Have completed_at timestamp older than retention period
 /// - Are in terminal state (completed, failed, cancelled)
+/// - Have ended: a failure with a retry scheduled has not (see [`STILL_LIVE`])
 ///
-/// Running workflows are never deleted.
+/// Running workflows are never deleted. A failure waiting for its retry was,
+/// once its failure was older than the period: the run the retry would start
+/// again was gone, and its journal with it.
 async fn cleanup_workflow_executions(pool: &PgPool, days: i32) -> Result<u64, sqlx::Error> {
     let cutoff = Timestamptz::now() - SignedDuration::from_hours(days as i64 * 24);
 
-    let result = sqlx::query(
+    let result = sqlx::query(&format!(
         r#"
         DELETE FROM workflow_executions
         WHERE completed_at < $1
           AND status IN ('completed', 'failed', 'cancelled')
-        "#,
-    )
+          AND NOT {STILL_LIVE}
+        "#
+    ))
     .bind(cutoff)
     .execute(pool)
     .await?;
@@ -206,19 +211,35 @@ async fn cleanup_execution_logs(pool: &PgPool, days: i32) -> Result<u64, sqlx::E
     Ok(deleted)
 }
 
-/// Clean up old journal entries
+/// Clean up the journals of runs that ended long ago
 ///
-/// Deletes workflow execution journal entries older than the retention period.
-/// Journal entries are kept longer than logs for audit purposes.
+/// A run's journal is what it replays from, so it is deleted only once the
+/// run has ended (see [`STILL_LIVE`]: a failure waiting for its retry has not)
+/// and ended before the retention period began, and then as a whole: every
+/// entry was written before the run ended. The journal of a run that no
+/// longer exists, its row deleted by [`cleanup_workflow_executions`], goes as
+/// its entries age, as every entry did before. A journal lives on the
+/// database its run does, so the run is looked for beside it.
+///
+/// This used to delete every entry older than the retention period whatever
+/// its run's state, so a run that slept, waited on an event or ran longer
+/// than the period lost the start of the history it replays from, and its
+/// next activation failed as non-deterministic or did the work again
+/// (orcher-io/orcher#44).
 async fn cleanup_journal_entries(pool: &PgPool, days: i32) -> Result<u64, sqlx::Error> {
     let cutoff = Timestamptz::now() - SignedDuration::from_hours(days as i64 * 24);
 
-    let result = sqlx::query(
+    let result = sqlx::query(&format!(
         r#"
-        DELETE FROM workflow_execution_journal
-        WHERE created_at < $1
-        "#,
-    )
+        DELETE FROM workflow_execution_journal j
+        WHERE j.created_at < $1
+          AND NOT EXISTS (
+              SELECT 1 FROM workflow_executions
+              WHERE workflow_executions.execution_id = j.execution_id
+                AND (completed_at IS NULL OR completed_at >= $1 OR {STILL_LIVE})
+          )
+        "#
+    ))
     .bind(cutoff)
     .execute(pool)
     .await?;
