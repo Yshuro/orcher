@@ -124,6 +124,17 @@ async fn a_workflows_backlog_is_not_read_once_per_batch() {
     let workflow = Uuid::new_v4();
     rows(&setup, workflow, "dispatch_task", BACKLOG).await;
     rows(&setup, workflow, "dispatch_step", HANDLED).await;
+    // The planner is told what the outbox now holds. Its statistics were
+    // last taken of an outbox an earlier test had emptied, and a claim
+    // planned for an empty outbox reads every pending row it holds, on each
+    // claim, whatever the processor does: over a million rows here, when
+    // autovacuum had not yet looked at the table, and a few thousand when it
+    // looked partway through (orcher-io/orcher#61). What is measured is the
+    // processor, not how recently the table was analyzed.
+    sqlx::query("ANALYZE outbox_queue")
+        .execute(&setup)
+        .await
+        .expect("analyze the outbox");
 
     // The setup's own reads, its emptying the outbox among them, are
     // reported as its connections end; the count starts once they are in.
