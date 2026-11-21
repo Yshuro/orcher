@@ -21,10 +21,10 @@ name: release-please
 # updater insists on rewriting a literal version in each member manifest, which
 # is precisely what inheritance exists to avoid.
 #
-# Pre-1.0 rules, set in release-please-config.json: `feat` and `fix` bump the
-# patch, so releases step 0.5.0, 0.5.1, 0.5.2; only a breaking change bumps
-# the minor, rather than jumping to 1.0.0. Take `bump-minor-pre-major` off
-# when the API is worth promising otherwise.
+# Pre-1.0 rules, set in .github/release-please-config.json: `feat` and `fix`
+# bump the patch, so releases step 0.5.0, 0.5.1, 0.5.2; only a breaking change
+# bumps the minor, rather than jumping to 1.0.0. Take `bump-minor-pre-major`
+# off when the API is worth promising otherwise.
 
 on:
   push:
@@ -52,8 +52,8 @@ jobs:
       - uses: googleapis/release-please-action@v5
         id: release
         with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+          config-file: .github/release-please-config.json
+          manifest-file: .github/.release-please-manifest.json
 
   # Carry the new version into Cargo.lock.
   #
