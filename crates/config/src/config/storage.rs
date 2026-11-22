@@ -1,4 +1,4 @@
-//! Storage configuration (database, Redis, pooling, backup, encryption).
+//! Storage configuration (database, Redis, pooling, backup).
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -17,9 +17,6 @@ pub struct StorageConfig {
 
     /// Backup configuration
     pub backup: BackupConfig,
-
-    /// Storage encryption configuration
-    pub encryption: StorageEncryptionConfig,
 
     /// Performance configuration
     pub performance: StoragePerformanceConfig,
@@ -148,12 +145,6 @@ pub struct BackupConfig {
     /// Backup compression
     pub compression: BackupCompressionConfig,
 
-    /// Backup encryption
-    pub encryption_enabled: bool,
-
-    /// Backup encryption key
-    pub encryption_key_path: Option<PathBuf>,
-
     /// Include data in backups
     pub include_data: bool,
 
@@ -162,25 +153,6 @@ pub struct BackupConfig {
 
     /// Backup verification
     pub verify_backups: bool,
-}
-
-/// Storage encryption configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageEncryptionConfig {
-    /// Enable encryption at rest
-    pub encryption_at_rest: bool,
-
-    /// Encryption algorithm
-    pub algorithm: EncryptionAlgorithm,
-
-    /// Key management service
-    pub key_management: KeyManagementConfig,
-
-    /// Encrypt sensitive fields
-    pub encrypt_sensitive_fields: bool,
-
-    /// List of fields to encrypt
-    pub encrypted_fields: Vec<String>,
 }
 
 /// Storage performance configuration
@@ -284,62 +256,6 @@ pub struct BackupCompressionConfig {
     pub level: u8,
 }
 
-/// Encryption algorithm enumeration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EncryptionAlgorithm {
-    /// AES-256-GCM
-    AES256GCM,
-    /// AES-128-GCM
-    AES128GCM,
-    /// ChaCha20-Poly1305
-    ChaCha20Poly1305,
-}
-
-/// Key management configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyManagementConfig {
-    /// Key management service type
-    pub service_type: KeyManagementService,
-
-    /// Key rotation interval in days
-    pub rotation_interval_days: u32,
-
-    /// Enable automatic key rotation
-    pub auto_rotation: bool,
-}
-
-/// Key management service enumeration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum KeyManagementService {
-    /// Local key management
-    Local,
-    /// AWS KMS
-    AwsKms {
-        /// AWS region
-        region: String,
-        /// KMS key ID
-        key_id: String,
-    },
-    /// Azure Key Vault
-    AzureKeyVault {
-        /// Key vault URL
-        vault_url: String,
-        /// Key name in vault
-        key_name: String,
-    },
-    /// Google Cloud KMS
-    GoogleKms {
-        /// Google Cloud project ID
-        project_id: String,
-        /// KMS location
-        location: String,
-        /// Key ring name
-        key_ring: String,
-        /// Key name in ring
-        key_name: String,
-    },
-}
-
 /// Compression algorithm enumeration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CompressionAlgorithm {
@@ -436,32 +352,9 @@ impl Default for BackupConfig {
                 algorithm: CompressionAlgorithm::Gzip,
                 level: 6,
             },
-            encryption_enabled: false,
-            encryption_key_path: None,
             include_data: true,
             include_schema: true,
             verify_backups: true,
-        }
-    }
-}
-
-impl Default for StorageEncryptionConfig {
-    fn default() -> Self {
-        Self {
-            encryption_at_rest: false,
-            algorithm: EncryptionAlgorithm::AES256GCM,
-            key_management: KeyManagementConfig {
-                service_type: KeyManagementService::Local,
-                rotation_interval_days: 90,
-                auto_rotation: false,
-            },
-            encrypt_sensitive_fields: true,
-            encrypted_fields: vec![
-                "password".to_string(),
-                "api_key".to_string(),
-                "secret".to_string(),
-                "token".to_string(),
-            ],
         }
     }
 }
@@ -496,7 +389,6 @@ mod tests {
         assert!(config.redis.url.contains("redis"));
         assert!(config.pooling.enabled);
         assert!(config.backup.enabled);
-        assert!(!config.encryption.encryption_at_rest);
         assert!(config.performance.query_cache_enabled);
     }
 
@@ -537,15 +429,6 @@ mod tests {
         assert!(config.include_data);
         assert!(config.include_schema);
         assert!(config.verify_backups);
-    }
-
-    #[test]
-    fn test_storage_encryption_config_default() {
-        let config = StorageEncryptionConfig::default();
-        assert!(!config.encryption_at_rest);
-        assert!(matches!(config.algorithm, EncryptionAlgorithm::AES256GCM));
-        assert!(config.encrypt_sensitive_fields);
-        assert!(config.encrypted_fields.contains(&"password".to_string()));
     }
 
     #[test]
@@ -603,47 +486,6 @@ mod tests {
             BackupStorageLocation::Local(_)
         ));
         assert!(matches!(s3_deserialized, BackupStorageLocation::S3 { .. }));
-    }
-
-    #[test]
-    fn test_encryption_algorithms() {
-        let algorithms = vec![
-            EncryptionAlgorithm::AES256GCM,
-            EncryptionAlgorithm::AES128GCM,
-            EncryptionAlgorithm::ChaCha20Poly1305,
-        ];
-
-        for algorithm in algorithms {
-            let json = serde_json::to_string(&algorithm).unwrap();
-            let deserialized: EncryptionAlgorithm = serde_json::from_str(&json).unwrap();
-            assert!(matches!(
-                deserialized,
-                EncryptionAlgorithm::AES256GCM
-                    | EncryptionAlgorithm::AES128GCM
-                    | EncryptionAlgorithm::ChaCha20Poly1305
-            ));
-        }
-    }
-
-    #[test]
-    fn test_key_management_services() {
-        let local = KeyManagementService::Local;
-        let aws = KeyManagementService::AwsKms {
-            region: "us-east-1".to_string(),
-            key_id: "key-123".to_string(),
-        };
-
-        let local_json = serde_json::to_string(&local).unwrap();
-        let aws_json = serde_json::to_string(&aws).unwrap();
-
-        let local_deserialized: KeyManagementService = serde_json::from_str(&local_json).unwrap();
-        let aws_deserialized: KeyManagementService = serde_json::from_str(&aws_json).unwrap();
-
-        assert!(matches!(local_deserialized, KeyManagementService::Local));
-        assert!(matches!(
-            aws_deserialized,
-            KeyManagementService::AwsKms { .. }
-        ));
     }
 
     #[test]

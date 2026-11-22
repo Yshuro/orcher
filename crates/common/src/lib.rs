@@ -10,7 +10,6 @@ pub use serde_json;
 #[cfg(feature = "uuid")]
 pub use uuid;
 
-pub mod crypto;
 pub mod error;
 pub mod events;
 pub mod payload;
