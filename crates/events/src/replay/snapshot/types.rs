@@ -110,7 +110,6 @@ pub struct SnapshotConfig {
     /// Won't create a new snapshot until at least this many events have passed.
     pub min_events_between_snapshots: usize,
     pub compress: bool,
-    pub encryption_key: Option<Vec<u8>>,
 }
 
 impl Default for SnapshotConfig {
@@ -121,7 +120,6 @@ impl Default for SnapshotConfig {
             max_snapshot_age: Some(SignedDuration::from_hours(30 * 24)),
             min_events_between_snapshots: 100,
             compress: true,
-            encryption_key: None,
         }
     }
 }

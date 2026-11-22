@@ -1,4 +1,4 @@
-//! Security configuration (JWT, encryption, audit, access control).
+//! Security configuration (JWT, audit, access control).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -9,9 +9,6 @@ use std::path::PathBuf;
 pub struct SecurityConfig {
     /// JWT authentication configuration
     pub jwt: JwtConfig,
-
-    /// Encryption configuration
-    pub encryption: EncryptionConfig,
 
     /// Audit logging configuration
     pub audit: AuditConfig,
@@ -58,28 +55,6 @@ pub struct JwtConfig {
 
     /// Include user claims in token
     pub include_user_claims: bool,
-}
-
-/// Encryption configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EncryptionConfig {
-    /// Enable field-level encryption
-    pub field_encryption_enabled: bool,
-
-    /// Encryption algorithm
-    pub algorithm: EncryptionAlgorithm,
-
-    /// Key derivation configuration
-    pub key_derivation: KeyDerivationConfig,
-
-    /// Encrypted field mappings
-    pub encrypted_fields: HashMap<String, FieldEncryptionConfig>,
-
-    /// Enable data masking
-    pub data_masking_enabled: bool,
-
-    /// Data masking rules
-    pub masking_rules: Vec<MaskingRule>,
 }
 
 /// Audit logging configuration
@@ -203,61 +178,6 @@ pub enum JwtAlgorithm {
     ES384,
     /// ECDSA SHA-512
     ES512,
-}
-
-/// Encryption algorithm enumeration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EncryptionAlgorithm {
-    /// AES-256-GCM
-    AES256GCM,
-    /// AES-128-GCM
-    AES128GCM,
-    /// ChaCha20-Poly1305
-    ChaCha20Poly1305,
-    /// XChaCha20-Poly1305
-    XChaCha20Poly1305,
-}
-
-/// Key derivation configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyDerivationConfig {
-    /// Algorithm for key derivation
-    pub algorithm: KeyDerivationAlgorithm,
-
-    /// Salt length in bytes
-    pub salt_length: u32,
-
-    /// Number of iterations
-    pub iterations: u32,
-
-    /// Output key length in bytes
-    pub key_length: u32,
-}
-
-/// Field encryption configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FieldEncryptionConfig {
-    /// Encryption enabled for this field
-    pub enabled: bool,
-
-    /// Field-specific algorithm
-    pub algorithm: Option<EncryptionAlgorithm>,
-
-    /// Field-specific key identifier
-    pub key_id: Option<String>,
-}
-
-/// Data masking rule
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MaskingRule {
-    /// Field name to mask
-    pub field_name: String,
-
-    /// Masking type
-    pub mask_type: MaskingType,
-
-    /// Custom masking pattern
-    pub pattern: Option<String>,
 }
 
 /// Audit log level enumeration
@@ -415,32 +335,6 @@ pub struct SessionCookieConfig {
     pub same_site: SameSitePolicy,
 }
 
-/// Key derivation algorithm enumeration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum KeyDerivationAlgorithm {
-    /// PBKDF2
-    PBKDF2,
-    /// Argon2
-    Argon2,
-    /// Scrypt
-    Scrypt,
-}
-
-/// Masking type enumeration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MaskingType {
-    /// Replace with asterisks
-    Asterisk,
-    /// Replace with X characters
-    X,
-    /// Show only first N characters
-    FirstN(u32),
-    /// Show only last N characters
-    LastN(u32),
-    /// Custom pattern
-    Custom,
-}
-
 /// Signature algorithm enumeration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SignatureAlgorithm {
@@ -478,35 +372,6 @@ impl Default for JwtConfig {
             allow_refresh: true,
             max_refresh_count: 5,
             include_user_claims: true,
-        }
-    }
-}
-
-impl Default for EncryptionConfig {
-    fn default() -> Self {
-        Self {
-            field_encryption_enabled: false,
-            algorithm: EncryptionAlgorithm::AES256GCM,
-            key_derivation: KeyDerivationConfig {
-                algorithm: KeyDerivationAlgorithm::PBKDF2,
-                salt_length: 32,
-                iterations: 100_000,
-                key_length: 32,
-            },
-            encrypted_fields: HashMap::new(),
-            data_masking_enabled: true,
-            masking_rules: vec![
-                MaskingRule {
-                    field_name: "password".to_string(),
-                    mask_type: MaskingType::Asterisk,
-                    pattern: None,
-                },
-                MaskingRule {
-                    field_name: "email".to_string(),
-                    mask_type: MaskingType::FirstN(3),
-                    pattern: None,
-                },
-            ],
         }
     }
 }
@@ -608,7 +473,6 @@ mod tests {
     fn test_security_config_default() {
         let config = SecurityConfig::default();
         assert!(config.jwt.enabled);
-        assert!(!config.encryption.field_encryption_enabled);
         assert!(config.audit.enabled);
         assert!(config.access_control.rbac_enabled);
         assert!(!config.api_security.api_keys_enabled);
@@ -623,15 +487,6 @@ mod tests {
         assert_eq!(config.issuer, "orcher");
         assert!(matches!(config.algorithm, JwtAlgorithm::HS256));
         assert!(config.allow_refresh);
-    }
-
-    #[test]
-    fn test_encryption_config_default() {
-        let config = EncryptionConfig::default();
-        assert!(!config.field_encryption_enabled);
-        assert!(matches!(config.algorithm, EncryptionAlgorithm::AES256GCM));
-        assert!(config.data_masking_enabled);
-        assert_eq!(config.masking_rules.len(), 2);
     }
 
     #[test]
@@ -753,35 +608,10 @@ mod tests {
     }
 
     #[test]
-    fn test_masking_types() {
-        let types = vec![
-            MaskingType::Asterisk,
-            MaskingType::X,
-            MaskingType::FirstN(5),
-            MaskingType::LastN(3),
-            MaskingType::Custom,
-        ];
-
-        for mask_type in types {
-            let json = serde_json::to_string(&mask_type).unwrap();
-            let deserialized: MaskingType = serde_json::from_str(&json).unwrap();
-            assert!(matches!(
-                deserialized,
-                MaskingType::Asterisk
-                    | MaskingType::X
-                    | MaskingType::FirstN(_)
-                    | MaskingType::LastN(_)
-                    | MaskingType::Custom
-            ));
-        }
-    }
-
-    #[test]
     fn test_config_serialization() {
         let config = SecurityConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("jwt"));
-        assert!(json.contains("encryption"));
         assert!(json.contains("audit"));
         assert!(json.contains("access_control"));
 

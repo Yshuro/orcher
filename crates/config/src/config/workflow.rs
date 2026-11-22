@@ -177,24 +177,8 @@ pub struct WorkflowVariablesConfig {
     /// Maximum variable size in bytes
     pub max_variable_size: u64,
 
-    /// Variable encryption settings
-    pub encryption: VariableEncryptionConfig,
-
     /// Variable validation settings
     pub validation: VariableValidationConfig,
-}
-
-/// Variable encryption configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VariableEncryptionConfig {
-    /// Enable variable encryption
-    pub enabled: bool,
-
-    /// Encryption algorithm
-    pub algorithm: String,
-
-    /// Patterns for variables that should be encrypted
-    pub encrypt_patterns: Vec<String>,
 }
 
 /// Variable validation configuration
@@ -706,23 +690,7 @@ impl Default for WorkflowVariablesConfig {
         Self {
             max_variables: 1000,
             max_variable_size: 1024 * 1024, // 1 MB
-            encryption: VariableEncryptionConfig::default(),
             validation: VariableValidationConfig::default(),
-        }
-    }
-}
-
-impl Default for VariableEncryptionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            algorithm: "AES-256-GCM".to_string(),
-            encrypt_patterns: vec![
-                "*password*".to_string(),
-                "*secret*".to_string(),
-                "*token*".to_string(),
-                "*key*".to_string(),
-            ],
         }
     }
 }
@@ -1022,16 +990,6 @@ mod tests {
             let deserialized: LoadBalancingAlgorithm = serde_json::from_str(&json).unwrap();
             assert_eq!(algorithm, deserialized);
         }
-    }
-
-    #[test]
-    fn test_variable_encryption_config() {
-        let config = VariableEncryptionConfig::default();
-
-        assert!(config.enabled);
-        assert_eq!(config.algorithm, "AES-256-GCM");
-        assert!(config.encrypt_patterns.contains(&"*password*".to_string()));
-        assert!(config.encrypt_patterns.contains(&"*secret*".to_string()));
     }
 
     #[test]
