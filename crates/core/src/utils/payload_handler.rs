@@ -3,29 +3,22 @@
 use crate::error::{CoreError, CoreResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::Value;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
-/// Decode input payload, handling both plain JSON and Payload envelope formats.
+/// The value to store for a workflow input, which arrives either as plain
+/// JSON or inside a Payload envelope.
 ///
-/// This is the main entry point for server-side payload processing. It:
-/// 1. Detects if the input is a Payload envelope or plain JSON
-/// 2. Unwraps the envelope if needed
-/// 3. Returns the plain JSON data
-///
-/// # Arguments
-///
-/// * `input` - The input value (either plain JSON or Payload envelope)
-///
-/// # Returns
-///
-/// The unwrapped JSON value, ready for storage in the database.
+/// - Plain JSON is returned as it is.
+/// - An envelope whose encoding is JSON is unwrapped to the JSON it carries, so
+///   that the stored input is readable and a worker receives the input itself.
+/// - An envelope with any other encoding (compressed or encrypted by the
+///   client, for example) is returned as it is. The engine holds no key and
+///   has no business reading such data: it stores the envelope and hands it
+///   back unchanged, and the worker that shares the client's codec decodes it.
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - The Payload envelope is malformed
-/// - The data field cannot be decoded
-/// - The encoding format is unsupported
+/// Returns an error if an envelope that claims JSON does not carry JSON.
 ///
 /// # Examples
 ///
@@ -35,27 +28,46 @@ use tracing::{debug, trace, warn};
 ///
 /// // Plain JSON passes through
 /// let plain = json!({"key": "value"});
-/// let result = decode_input_payload(&plain)?;
-/// assert_eq!(result, plain);
+/// assert_eq!(decode_input_payload(&plain)?, plain);
 ///
-/// // Payload envelope is unwrapped
+/// // A JSON envelope is unwrapped
 /// let envelope = json!({
 ///     "metadata": {"encoding": "json"},
 ///     "data": [123, 34, 107, 101, 121, 34, 58, 34, 118, 97, 108, 117, 101, 34, 125]
 /// });
-/// let result = decode_input_payload(&envelope)?;
-/// assert_eq!(result, json!({"key": "value"}));
+/// assert_eq!(decode_input_payload(&envelope)?, json!({"key": "value"}));
+///
+/// // An encrypted envelope is kept whole
+/// let encrypted = json!({
+///     "metadata": {"encoding": "binary/encrypted"},
+///     "data": "3q2+7w=="
+/// });
+/// assert_eq!(decode_input_payload(&encrypted)?, encrypted);
 /// # Ok::<(), orcher_core::error::Error>(())
 /// ```
 pub fn decode_input_payload(input: &Value) -> CoreResult<Value> {
-    // Check if this is a Payload envelope
-    if is_payload_envelope(input) {
-        debug!("Detected Payload envelope format, unwrapping...");
-        unwrap_payload_envelope(input)
-    } else {
-        // Plain JSON - pass through
+    if !is_payload_envelope(input) {
         trace!("Input is plain JSON, passing through");
-        Ok(input.clone())
+        return Ok(input.clone());
+    }
+    match envelope_encoding(input) {
+        Some(encoding) if !encoding.contains("json") => {
+            debug!(%encoding, "Payload envelope is not JSON; storing it unread");
+            Ok(input.clone())
+        }
+        _ => unwrap_payload_envelope(input),
+    }
+}
+
+/// The `encoding` an envelope declares, if it declares one.
+///
+/// SDKs write a metadata value either as a string or as the bytes of one
+/// (an array of numbers), so both are read.
+fn envelope_encoding(envelope: &Value) -> Option<String> {
+    match envelope.get("metadata")?.get("encoding")? {
+        Value::String(s) => Some(s.clone()),
+        bytes @ Value::Array(_) => String::from_utf8(extract_bytes_from_data(bytes).ok()?).ok(),
+        _ => None,
     }
 }
 
@@ -120,121 +132,35 @@ pub fn is_payload_envelope(value: &Value) -> bool {
     false
 }
 
-/// Unwrap a Payload envelope and extract the JSON data.
-///
-/// This function handles multiple encoding formats:
-/// - JSON encoding with byte array data
-/// - JSON encoding with base64 string data
-/// - Binary/Protobuf encoding (returns data as-is)
-///
-/// # Arguments
-///
-/// * `envelope` - The Payload envelope value
-///
-/// # Returns
-///
-/// The unwrapped JSON data.
+/// Unwrap a Payload envelope whose data is JSON, as bytes or as base64.
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - The envelope is malformed
-/// - The encoding is unsupported
-/// - The data cannot be decoded
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use orcher_core::utils::payload_handler::unwrap_payload_envelope;
-/// use serde_json::json;
-///
-/// let envelope = json!({
-///     "metadata": {"encoding": "json"},
-///     "data": [123, 34, 107, 101, 121, 34, 58, 34, 118, 97, 108, 117, 101, 34, 125]
-/// });
-/// let result = unwrap_payload_envelope(&envelope)?;
-/// assert_eq!(result, json!({"key": "value"}));
-/// # Ok::<(), orcher_core::error::Error>(())
-/// ```
+/// Returns an error if the envelope is malformed or its data is not JSON.
 pub fn unwrap_payload_envelope(envelope: &Value) -> CoreResult<Value> {
     let obj = envelope.as_object().ok_or_else(|| {
         CoreError::ValidationFailed("Payload envelope must be an object".to_string())
     })?;
 
-    // Extract metadata
-    let metadata = obj
-        .get("metadata")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| {
-            CoreError::ValidationFailed("Payload envelope must have metadata object".to_string())
-        })?;
+    if !obj.get("metadata").is_some_and(Value::is_object) {
+        return Err(CoreError::ValidationFailed(
+            "Payload envelope must have metadata object".to_string(),
+        ));
+    }
 
-    // Extract data
     let data = obj.get("data").ok_or_else(|| {
         CoreError::ValidationFailed("Payload envelope must have data field".to_string())
     })?;
 
-    // Get encoding from metadata
-    let encoding = metadata
-        .get("encoding")
-        .and_then(|v| v.as_str())
-        .unwrap_or("json");
-
-    debug!("Unwrapping payload with encoding: {}", encoding);
-
-    // Handle different encoding types
-    if encoding.contains("json") {
-        decode_json_payload_data(data)
-    } else if encoding.contains("protobuf") || encoding.contains("binary") {
-        decode_binary_payload_data(data)
-    } else {
-        warn!("Unknown encoding '{}', attempting JSON decode", encoding);
-        decode_json_payload_data(data)
-    }
+    decode_json_payload_data(data)
 }
 
-/// Decode JSON payload data from bytes or base64.
-///
-/// # Arguments
-///
-/// * `data` - The data field from the Payload envelope (array or string)
-///
-/// # Returns
-///
-/// The decoded JSON value.
-///
-/// # Errors
-///
-/// Returns an error if the data cannot be decoded as JSON.
+/// Parse JSON from an envelope's data field (a byte array or a base64 string).
 fn decode_json_payload_data(data: &Value) -> CoreResult<Value> {
     let bytes = extract_bytes_from_data(data)?;
 
-    // Parse the bytes as JSON
     serde_json::from_slice(&bytes)
         .map_err(|e| CoreError::Internal(format!("Failed to parse JSON from payload data: {}", e)))
-}
-
-/// Decode binary payload data (returns as-is for now).
-///
-/// In the future, this could handle Protobuf deserialization or other binary formats.
-///
-/// # Arguments
-///
-/// * `data` - The data field from the Payload envelope
-///
-/// # Returns
-///
-/// A JSON object with the raw bytes (for debugging/storage).
-fn decode_binary_payload_data(data: &Value) -> CoreResult<Value> {
-    let bytes = extract_bytes_from_data(data)?;
-
-    // For binary data, we'll return a base64-encoded string wrapped in an object
-    // This allows it to be stored in JSON format
-    let base64_str = BASE64.encode(&bytes);
-    Ok(serde_json::json!({
-        "binary_data": base64_str,
-        "length": bytes.len()
-    }))
 }
 
 /// Extract bytes from the data field of a Payload.
@@ -436,14 +362,55 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_binary_payload_data() {
-        let bytes = vec![1, 2, 3, 4, 5];
-        let data = json!(bytes);
-        let result = decode_binary_payload_data(&data).unwrap();
+    fn an_encrypted_envelope_is_kept_whole() {
+        // What a client that encrypts sends: the data is ciphertext, which
+        // is not JSON and must not be parsed as it.
+        let envelope = json!({
+            "metadata": {"encoding": "binary/encrypted", "key-id": "k1"},
+            "data": "3q2+7wABAgM="
+        });
+        assert_eq!(decode_input_payload(&envelope).unwrap(), envelope);
+    }
 
-        // Should return base64-encoded data
-        assert!(result.get("binary_data").is_some());
-        assert_eq!(result.get("length"), Some(&json!(5)));
+    #[test]
+    fn an_encoding_written_as_bytes_is_read() {
+        // serde writes a `Vec<u8>` metadata value as an array of numbers.
+        let encoding: Vec<u8> = b"binary/encrypted".to_vec();
+        let envelope = json!({
+            "metadata": {"encoding": encoding},
+            "data": [222, 173, 190, 239]
+        });
+        assert_eq!(decode_input_payload(&envelope).unwrap(), envelope);
+
+        let json_encoding: Vec<u8> = b"json".to_vec();
+        let envelope = json!({
+            "metadata": {"encoding": json_encoding},
+            "data": br#"{"k":1}"#.to_vec()
+        });
+        assert_eq!(decode_input_payload(&envelope).unwrap(), json!({"k": 1}));
+    }
+
+    #[test]
+    fn a_compressed_or_binary_envelope_is_kept_whole() {
+        for encoding in [
+            "binary/gzip",
+            "binary/protobuf",
+            "binary",
+            "application/x-thing",
+        ] {
+            let envelope = json!({"metadata": {"encoding": encoding}, "data": [1, 2, 3]});
+            assert_eq!(
+                decode_input_payload(&envelope).unwrap(),
+                envelope,
+                "{encoding}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_json_envelope_that_does_not_carry_json_is_refused() {
+        let envelope = json!({"metadata": {"encoding": "json"}, "data": [222, 173]});
+        assert!(decode_input_payload(&envelope).is_err());
     }
 
     #[test]
