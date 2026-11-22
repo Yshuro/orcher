@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.6](https://github.com/orcher-io/orcher/compare/v0.7.5...v0.7.6) (2026-11-22)
+
+
+### Documentation
+
+* wait for the engine before the README says it is ready ([#79](https://github.com/orcher-io/orcher/issues/79)) ([fcbd6f5](https://github.com/orcher-io/orcher/commit/fcbd6f50cbda82a44c406b67e103342eb8150d89)), closes [#78](https://github.com/orcher-io/orcher/issues/78)
+
 ## [0.7.5](https://github.com/orcher-io/orcher/compare/v0.7.4...v0.7.5) (2026-11-22)
 
 
