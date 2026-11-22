@@ -18,7 +18,7 @@ docker run -d --name orcher --network orcher \
   -e DATABASE_URL=postgresql://orcher:orcher@orcher-postgres:5432/orcher \
   -e ORCHER_INSECURE=true \
   ghcr.io/orcher-io/orcher:latest
-curl -fsS localhost:8080/health/ready && echo ready
+until curl -fsS localhost:8080/health/ready >/dev/null 2>&1; do sleep 1; done; echo ready
 ```
 
 Point an SDK at `http://localhost:50051`, namespace `default`, and open
