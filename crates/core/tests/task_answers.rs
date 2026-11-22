@@ -876,3 +876,46 @@ async fn a_heartbeat_for_a_finished_task_is_a_failed_precondition() {
 
     engine.cleanup(&[id]).await;
 }
+
+/// A task's outcome wakes its workflow while another of its tasks still runs:
+/// the workflow may be waiting on the first of several, or on one while
+/// another runs on. A failure whose retry is waiting does not: the retry's
+/// outcome is the one the workflow waits for.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL
+async fn an_outcome_wakes_the_workflow_while_another_task_runs() {
+    let engine = Engine::new().await;
+    let (id, execution_id) = engine.claimed_workflow("first-of-several").await;
+    let first = started_attempt(&engine, id, &execution_id, "fetch_0", 1).await;
+    let other = started_attempt(&engine, id, &execution_id, "fetch_1", 1).await;
+
+    engine
+        .service
+        .complete_task_execution(completion(&first, "fetched"))
+        .await
+        .expect("complete the task");
+    assert!(
+        woken(&engine.pool, id).await,
+        "a completion wakes the workflow while another task runs"
+    );
+    reclaim(&engine.pool, id).await;
+
+    engine
+        .service
+        .fail_task_execution(failure(&other, "Transient"))
+        .await
+        .expect("fail the task");
+    let retry_waiting: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM task_executions WHERE workflow_id = $1 \
+         AND task_id = 'fetch_1' AND status = 'scheduled')",
+    )
+    .bind(id)
+    .fetch_one(&engine.pool)
+    .await
+    .expect("read the retry");
+    assert!(retry_waiting, "the failed task is retried");
+    assert!(
+        !woken(&engine.pool, id).await,
+        "a failure whose retry is waiting woke the workflow"
+    );
+}

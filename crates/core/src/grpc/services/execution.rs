@@ -4247,7 +4247,10 @@ impl ExecutionServiceTrait for ExecutionService {
 
         // Workflow Resume Mechanism: Check if all tasks complete and re-queue workflow
         // This is the critical missing piece that enables workflow continuation after tasks finish
-        match self.check_should_requeue_workflow(workflow_id_uuid).await {
+        match self
+            .check_should_requeue_workflow(workflow_id_uuid, &task_exec.task_id)
+            .await
+        {
             Ok(true) => {
                 // All tasks complete - re-queue workflow for continuation
                 let requeue_result = if let Some(ref wf) = workflow_info {
@@ -4620,7 +4623,10 @@ impl ExecutionServiceTrait for ExecutionService {
 
         // Workflow Resume Mechanism: Check if all tasks complete and re-queue workflow
         // Even on failure, workflow needs to continue (might have error handling)
-        match self.check_should_requeue_workflow(workflow_id_uuid).await {
+        match self
+            .check_should_requeue_workflow(workflow_id_uuid, &task.task_id)
+            .await
+        {
             Ok(true) => {
                 if let Err(e) = self
                     .requeue_workflow_for_continuation(workflow_id_uuid)
@@ -4832,7 +4838,10 @@ impl ExecutionServiceTrait for ExecutionService {
         info!(task_id = %task_id, "Task execution marked as cancelled");
 
         // 5. Re-queue workflow for continuation if all tasks are now terminal
-        match self.check_should_requeue_workflow(workflow_id_uuid).await {
+        match self
+            .check_should_requeue_workflow(workflow_id_uuid, &task_exec.task_id)
+            .await
+        {
             Ok(true) => {
                 if let Err(e) = self
                     .requeue_workflow_for_continuation(workflow_id_uuid)
@@ -5975,19 +5984,27 @@ impl ExecutionService {
         self.child_outcomes.deliver_for_run(&run).await
     }
 
-    /// Whether the workflow should be handed out again now that one of its
-    /// tasks has finished: none of its tasks is still waiting or running. Only
-    /// a task's completion or failure asks, so the workflow has at least one.
-    async fn check_should_requeue_workflow(&self, workflow_id: Uuid) -> OrcherResult<bool> {
+    /// Whether the workflow should be handed out again now that an attempt
+    /// of its task `task_id` has finished: that step has no attempt still
+    /// waiting or running. A retry of the step leaves one, and its outcome is
+    /// the one the workflow waits for; another step's open attempts do not
+    /// count, since the workflow may be waiting on this step alone (the first
+    /// of several, or one awaited while another runs on).
+    async fn check_should_requeue_workflow(
+        &self,
+        workflow_id: Uuid,
+        task_id: &str,
+    ) -> OrcherResult<bool> {
         use orcher_common::types::identifiers::WorkflowId;
 
         let open = self
             .task_execution_repository
-            .has_open_tasks(WorkflowId::from_uuid(workflow_id))
+            .has_open_attempt(WorkflowId::from_uuid(workflow_id), task_id)
             .await?;
         debug!(
             workflow_id = %workflow_id,
-            open_tasks = open,
+            task_id = %task_id,
+            open_attempt = open,
             "Checked whether the workflow is ready to be handed out again"
         );
         Ok(!open)

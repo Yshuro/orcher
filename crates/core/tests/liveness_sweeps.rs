@@ -455,58 +455,45 @@ async fn a_lost_wake_up_is_recovered_by_the_sweep() {
     cleanup(&pool, &[lost, consumed, retrying]).await;
 }
 
-/// A fan-out is woken once its last task has finished, as the ordinary
-/// wake-up would: not by each sibling's outcome while others still run, which
-/// replayed it once per sweep for every sibling.
+/// A task's outcome wakes its workflow while another of its tasks still
+/// runs, as the ordinary wake-up does: the workflow may be waiting on that
+/// task alone, the first of several or one awaited while another runs on.
+/// An outcome the workflow's claim is newer than is not woken for again.
 #[tokio::test]
 #[ignore] // Requires PostgreSQL
-async fn a_fan_out_is_woken_only_when_its_last_task_has_finished() {
+async fn an_outcome_wakes_its_workflow_while_another_task_runs() {
     let pool = pool().await;
     let task_queue = queue();
     let (id, execution_id) = parked_workflow(&pool, &task_queue, 60).await;
     let done = scheduled_task(&pool, id, &execution_id, &task_queue, "a_0", None).await;
-    let pending = scheduled_task(&pool, id, &execution_id, &task_queue, "b_0", None).await;
-    let finish = |task: Uuid| {
-        let pool = pool.clone();
-        async move {
-            sqlx::query(
-                "UPDATE task_executions SET status = 'completed', completed_at = NOW(), \
-                 started_at = COALESCE(started_at, NOW()) WHERE id = $1",
-            )
-            .bind(task)
-            .execute(&pool)
-            .await
-            .expect("finish the task");
-        }
-    };
+    let running = scheduled_task(&pool, id, &execution_id, &task_queue, "b_0", None).await;
     sqlx::query("UPDATE task_executions SET status = 'started', started_at = NOW() WHERE id = $1")
-        .bind(pending.id.as_uuid())
+        .bind(running.id.as_uuid())
         .execute(&pool)
         .await
-        .expect("start the sibling");
-    finish(done.id.as_uuid()).await;
+        .expect("start the other task");
+    sqlx::query(
+        "UPDATE task_executions SET status = 'completed', completed_at = NOW(), \
+         started_at = COALESCE(started_at, NOW()) WHERE id = $1",
+    )
+    .bind(done.id.as_uuid())
+    .execute(&pool)
+    .await
+    .expect("finish the task");
     journaled_without_wake_up(&pool, id, &execution_id, "TaskCompleted", "a_0", 30).await;
 
     let executions = WorkflowExecutionRepository::new(pool.clone());
-    let sweep = || {
-        executions.wake_parked_with_unconsumed_outcomes(
+    let (woken, more) = executions
+        .wake_parked_with_unconsumed_outcomes(
             Timestamptz::now() - Duration::from_secs(300),
             10,
             200,
         )
-    };
-    sweep().await.expect("sweep");
-    assert!(
-        claimed(&pool, id).await,
-        "woken while a sibling task is still running"
-    );
-
-    finish(pending.id.as_uuid()).await;
-    journaled_without_wake_up(&pool, id, &execution_id, "TaskCompleted", "b_0", 30).await;
-    let (woken, more) = sweep().await.expect("sweep");
+        .await
+        .expect("sweep");
     assert!(
         !claimed(&pool, id).await,
-        "not woken once every task finished"
+        "not woken while another task is still running"
     );
     assert!(woken.iter().any(|w| w.execution_id == execution_id));
     assert!(!more, "a sweep under its batch reports more to read");

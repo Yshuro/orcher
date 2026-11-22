@@ -5889,10 +5889,11 @@ impl WorkflowExecutionRepository {
     /// one that arrived while an activation was out left its wake-up pending
     /// for that activation's completion, so a parked execution with such an
     /// outcome is one whose wake-up went missing. A task's outcome counts only
-    /// once no task of the workflow is still scheduled or started, which is
-    /// the rule the ordinary wake-up follows (`check_should_requeue_workflow`):
-    /// a fan-out is not replayed as each sibling finishes, nor a failure whose
-    /// retry is waiting. Timer, child and event outcomes count as they are.
+    /// once its task has no attempt still scheduled or started, which is the
+    /// rule the ordinary wake-up follows (`check_should_requeue_workflow`): a
+    /// failure whose retry is waiting does not wake the workflow, and another
+    /// task still open does not hold it back. Timer, child and event outcomes
+    /// count as they are.
     /// `grace_secs`
     /// leaves the ordinary wake-up, which follows its outcome by milliseconds,
     /// time to happen first.
@@ -5941,6 +5942,7 @@ impl WorkflowExecutionRepository {
                              OR NOT EXISTS (
                                  SELECT 1 FROM task_executions t
                                  WHERE t.workflow_id = we.id
+                                   AND t.task_id = j.payload->>'task_id'
                                    AND t.status IN ('scheduled', 'started')))
                   )
                 LIMIT $4

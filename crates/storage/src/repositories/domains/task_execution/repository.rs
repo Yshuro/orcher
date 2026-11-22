@@ -2097,27 +2097,32 @@ impl TaskExecutionRepository {
         }
     }
 
-    /// Whether any of the workflow's tasks is still unfinished (`scheduled`
-    /// or `started`).
+    /// Whether the workflow's task `task_id` has an attempt still unfinished
+    /// (`scheduled` or `started`): a retry waiting for its backoff, or one
+    /// running.
     ///
-    /// What a task's completion needs to decide whether to wake its workflow,
+    /// What a task's outcome needs to decide whether to wake its workflow,
     /// answered from `idx_task_executions_open` (V077), which holds only
-    /// unfinished tasks: its cost does not grow with the workflow's length,
-    /// where counting every task by status read all of them on every
-    /// completion.
-    pub async fn has_open_tasks(&self, workflow_id: WorkflowId) -> OrcherResult<bool> {
+    /// unfinished tasks: its cost does not grow with the workflow's length.
+    pub async fn has_open_attempt(
+        &self,
+        workflow_id: WorkflowId,
+        task_id: &str,
+    ) -> OrcherResult<bool> {
         sqlx::query_scalar::<_, bool>(
             r#"
             SELECT EXISTS (SELECT 1 FROM task_executions
-                           WHERE workflow_id = $1 AND status IN ('scheduled', 'started'))
+                           WHERE workflow_id = $1 AND task_id = $2
+                             AND status IN ('scheduled', 'started'))
             "#,
         )
         .bind(workflow_id.as_uuid())
+        .bind(task_id)
         .fetch_one(self.pool_for(workflow_id.as_uuid()))
         .await
         .map_err(|e| {
-            error!(workflow_id = %workflow_id, error = %e, "Failed to check the workflow's open tasks");
-            OrcherError::internal(format!("Failed to check the workflow's open tasks: {}", e))
+            error!(workflow_id = %workflow_id, task_id = %task_id, error = %e, "Failed to check the task's open attempts");
+            OrcherError::internal(format!("Failed to check the task's open attempts: {}", e))
         })
     }
 
