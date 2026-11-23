@@ -6,7 +6,7 @@ use orcher_core::grpc::auth_layer::AuthMode;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OrchestratorConfig {
     #[serde(default)]
     pub server: ServerConfig,
@@ -922,28 +922,6 @@ impl PollingConfig {
     #[allow(dead_code)]
     pub fn is_sync_match_enabled(&self) -> bool {
         self.use_sync_match
-    }
-}
-
-impl Default for OrchestratorConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            orchestrator: OrchestratorCoreConfig::default(),
-            storage: StorageConfig::default(),
-            logging: LoggingConfig::default(),
-            health: HealthConfig::default(),
-            polling: PollingConfig::default(),
-            timeout_watcher: TimeoutWatcherConfig::default(),
-            workflow_retry: WorkflowRetryConfig::default(),
-            child_reconciler: ChildReconcilerConfig::default(),
-            worker_liveness: WorkerLivenessConfig::default(),
-            background_jobs: BackgroundJobsConfig::default(),
-            security: SecurityConfig::default(),
-            cluster: ClusterSettings::default(),
-            limits: LimitsConfig::default(),
-            ui: UiConfig::default(),
-        }
     }
 }
 
