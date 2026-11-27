@@ -221,10 +221,14 @@ pub struct ServerConfig {
     pub max_concurrent_streams: u32,
 }
 
+// This machine only: a deployment that serves others says so,
+// and authenticates them (see `exposes_unauthenticated_api`).
 fn default_grpc_addr() -> String {
     "127.0.0.1:50051".to_string()
 }
 
+// This machine only: a deployment that serves others says so,
+// and authenticates them (see `exposes_unauthenticated_api`).
 fn default_http_addr() -> String {
     "127.0.0.1:8080".to_string()
 }
@@ -249,7 +253,7 @@ pub struct OrchestratorCoreConfig {
     pub max_workers: usize,
     #[serde(default = "default_max_concurrent_tasks")]
     pub max_concurrent_tasks: usize,
-    #[serde(default = "default_heartbeat_timeout_secs")]
+    #[serde(default = "default_orchestrator_heartbeat_timeout_secs")]
     pub heartbeat_timeout_secs: u64,
 }
 
@@ -261,12 +265,16 @@ fn default_max_concurrent_tasks() -> usize {
     1000
 }
 
+fn default_orchestrator_heartbeat_timeout_secs() -> u64 {
+    90
+}
+
 impl Default for OrchestratorCoreConfig {
     fn default() -> Self {
         Self {
             max_workers: default_max_workers(),
             max_concurrent_tasks: default_max_concurrent_tasks(),
-            heartbeat_timeout_secs: default_heartbeat_timeout_secs(),
+            heartbeat_timeout_secs: default_orchestrator_heartbeat_timeout_secs(),
         }
     }
 }
@@ -316,25 +324,17 @@ impl Default for LoggingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthConfig {
-    #[serde(default = "default_readiness_enabled")]
+    #[serde(default = "default_enabled")]
     pub readiness_enabled: bool,
-    #[serde(default = "default_liveness_enabled")]
+    #[serde(default = "default_enabled")]
     pub liveness_enabled: bool,
-}
-
-fn default_readiness_enabled() -> bool {
-    true
-}
-
-fn default_liveness_enabled() -> bool {
-    true
 }
 
 impl Default for HealthConfig {
     fn default() -> Self {
         Self {
-            readiness_enabled: default_readiness_enabled(),
-            liveness_enabled: default_liveness_enabled(),
+            readiness_enabled: default_enabled(),
+            liveness_enabled: default_enabled(),
         }
     }
 }
@@ -1229,6 +1229,7 @@ mod tests {
         assert_eq!(config.server.grpc_addr, "127.0.0.1:50051");
         assert_eq!(config.server.http_addr, "127.0.0.1:8080");
         assert_eq!(config.orchestrator.max_workers, 100);
+        assert_eq!(config.orchestrator.heartbeat_timeout_secs, 90);
     }
 
     #[test]
@@ -1630,6 +1631,7 @@ mod section_defaults {
         assert_eq!(config.server.grpc_addr, "127.0.0.1:50051");
         assert_eq!(config.server.http_addr, "127.0.0.1:8080");
         assert_eq!(config.orchestrator.max_workers, 100);
+        assert_eq!(config.orchestrator.heartbeat_timeout_secs, 90);
         assert_eq!(config.storage.database_url, "postgresql://localhost/orcher");
         assert_eq!(config.logging.level, "info");
         assert!(config.health.readiness_enabled);
@@ -1641,11 +1643,31 @@ mod section_defaults {
         let toml = "";
         let config: OrchestratorConfig = toml::from_str(toml).expect("empty config parses");
         let default_config = OrchestratorConfig::default();
-        assert_eq!(config.server.grpc_addr, default_config.server.grpc_addr);
+        assert_eq!(
+            toml::to_string(&config).expect("serialize parsed"),
+            toml::to_string(&default_config).expect("serialize default")
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_partly_filled_section_defaults_its_omitted_fields_and_other_sections() {
+        let toml = r#"
+            [server]
+            grpc_addr = "0.0.0.0:50051"
+        "#;
+        let config: OrchestratorConfig =
+            toml::from_str(toml).expect("partly filled server section parses");
+        let default_config = OrchestratorConfig::default();
+        assert_eq!(config.server.grpc_addr, "0.0.0.0:50051");
         assert_eq!(config.server.http_addr, default_config.server.http_addr);
         assert_eq!(
-            config.orchestrator.max_workers,
-            default_config.orchestrator.max_workers
+            config.server.max_concurrent_streams,
+            default_config.server.max_concurrent_streams
+        );
+        assert_eq!(
+            config.orchestrator.heartbeat_timeout_secs,
+            default_config.orchestrator.heartbeat_timeout_secs
         );
         assert_eq!(
             config.storage.database_url,
